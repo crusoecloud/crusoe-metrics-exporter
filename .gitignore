@@ -1,0 +1,9 @@
+.DS_Store
+*.swp
+tests.xml
+coverage.xml
+.vscode/*
+.idea/*
+
+build/
+dist/
