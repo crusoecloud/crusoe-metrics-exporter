@@ -13,7 +13,7 @@ RUN go mod download
 COPY src/ ./src/
 
 # Build the binary
-RUN mkdir -p build/dist && CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o build/dist/crusoe-metrics-exporter ./src
+RUN mkdir -p build/dist && CGO_ENABLED=0 GOOS=linux go build -installsuffix cgo -o build/dist/crusoe-metrics-exporter ./src
 
 # Final stage
 FROM alpine:3.19
