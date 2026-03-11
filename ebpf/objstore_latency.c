@@ -26,26 +26,29 @@ struct config {
     __u16 padding;
 };
 
-// HTTP method classification
-#define HTTP_METHOD_UNKNOWN 0
-#define HTTP_METHOD_GET     1
-#define HTTP_METHOD_PUT     2
-#define HTTP_METHOD_POST    3
-#define HTTP_METHOD_DELETE  4
-#define HTTP_METHOD_HEAD    5
+// Request classification by TCP byte-ratio.
+// Works for both HTTP and HTTPS since it does not inspect payload.
+#define METHOD_OTHER   0
+#define METHOD_GET     1
+#define METHOD_PUT     2
+
+// Byte threshold: a request must send or receive more than this many
+// bytes to be classified as PUT or GET.  Below this, it is OTHER
+// (HEAD, DELETE, LIST, small objects, etc.).
+#define CLASSIFY_MIN_BYTES  4096
 
 // Composite key for per-IP, per-method stats.
 struct stats_key {
     __u32 dest_ip;
-    __u32 method;   // HTTP_METHOD_*
+    __u32 method;   // METHOD_*
 };
 
 // Track in-flight requests per socket
 struct active_request {
     __u64 send_time_ns;
-    __u64 send_size;
+    __u64 total_bytes_sent;  // accumulated across all tcp_sendmsg calls
     __u32 dest_ip;
-    __u32 method;   // HTTP_METHOD_*
+    __u32 _pad;
 };
 
 // Latency statistics structure
@@ -146,80 +149,15 @@ static __always_inline void update_objstore_histogram(__u64 *histogram,
         __sync_fetch_and_add(&histogram[bucket], 1);
 }
 
-// Detect the HTTP method from the first few bytes of a send buffer.
-// Returns HTTP_METHOD_* constant.
-//
-// We use raw bpf_probe_read_kernel (no CO-RE) because iov_iter field
-// names changed between kernel 5.15 and 6.x.  The msghdr layout on
-// x86_64 is stable:
-//   msg_name(8) + msg_namelen(4) + pad(4) = 16 bytes -> msg_iter at +16
-//
-// Inside iov_iter the iov pointer lives at different offsets:
-//   5.15: type(4)+pad(4)+iov_offset(8)+count(8)+union -> iov at +24
-//   6.x:  iter_type(1)+bools(2)+pad(5)+iov_offset(8)+union -> iov at +16
-//
-// The iov pointer points to a struct iovec whose first field (iov_base)
-// is the user-space buffer address -- stable across all versions.
-//
-// We try offset 16 first (6.x), then 24 (5.15).  If the first candidate
-// yields a readable HTTP method we return it; otherwise try the second.
-#define MSGHDR_ITER_OFFSET  16   // offsetof(msghdr, msg_iter) on x86_64
-#define IOV_OFFSET_6X       16   // iov_iter union offset on 6.x
-#define IOV_OFFSET_515      24   // iov_iter union offset on 5.15
-
-static __always_inline __u32 try_read_http_method(void *iov_ptr)
+// Classify a completed request as GET, PUT, or OTHER based on the
+// ratio of bytes sent vs bytes received.
+static __always_inline __u32 classify_method(__u64 bytes_sent, __u64 bytes_recv)
 {
-    // iov_ptr -> struct iovec; first field is iov_base (user-space ptr)
-    void *iov_base = NULL;
-    if (bpf_probe_read_kernel(&iov_base, sizeof(iov_base), iov_ptr) < 0)
-        return HTTP_METHOD_UNKNOWN;
-    if (!iov_base)
-        return HTTP_METHOD_UNKNOWN;
-
-    char buf[4] = {};
-    if (bpf_probe_read_user(buf, 4, iov_base) < 0)
-        return HTTP_METHOD_UNKNOWN;
-
-    if (buf[0] == 'G' && buf[1] == 'E' && buf[2] == 'T' && buf[3] == ' ')
-        return HTTP_METHOD_GET;
-    if (buf[0] == 'P' && buf[1] == 'U' && buf[2] == 'T' && buf[3] == ' ')
-        return HTTP_METHOD_PUT;
-    if (buf[0] == 'P' && buf[1] == 'O' && buf[2] == 'S' && buf[3] == 'T')
-        return HTTP_METHOD_POST;
-    if (buf[0] == 'H' && buf[1] == 'E' && buf[2] == 'A' && buf[3] == 'D')
-        return HTTP_METHOD_HEAD;
-    if (buf[0] == 'D' && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'E')
-        return HTTP_METHOD_DELETE;
-
-    return HTTP_METHOD_UNKNOWN;
-}
-
-static __always_inline __u32 detect_http_method(struct msghdr *msg)
-{
-    // Read the iov pointer at the 6.x offset first
-    void *iov_ptr = NULL;
-    void *iter_addr = (void *)msg + MSGHDR_ITER_OFFSET;
-
-    if (bpf_probe_read_kernel(&iov_ptr, sizeof(iov_ptr),
-                              iter_addr + IOV_OFFSET_6X) < 0)
-        return HTTP_METHOD_UNKNOWN;
-
-    if (iov_ptr) {
-        __u32 method = try_read_http_method(iov_ptr);
-        if (method != HTTP_METHOD_UNKNOWN)
-            return method;
-    }
-
-    // Fall back to 5.15 offset
-    iov_ptr = NULL;
-    if (bpf_probe_read_kernel(&iov_ptr, sizeof(iov_ptr),
-                              iter_addr + IOV_OFFSET_515) < 0)
-        return HTTP_METHOD_UNKNOWN;
-
-    if (iov_ptr)
-        return try_read_http_method(iov_ptr);
-
-    return HTTP_METHOD_UNKNOWN;
+    if (bytes_sent > CLASSIFY_MIN_BYTES && bytes_sent > 4 * bytes_recv)
+        return METHOD_PUT;
+    if (bytes_recv > CLASSIFY_MIN_BYTES && bytes_recv > 4 * bytes_sent)
+        return METHOD_GET;
+    return METHOD_OTHER;
 }
 
 // Record bytes sent for the given destination IP and method.
@@ -294,42 +232,21 @@ int tcp_sendmsg_entry(struct pt_regs *ctx)
 
     __u64 size = (__u64)PT_REGS_PARM3(ctx);
 
-    // Detect HTTP method from the send payload.  Only the first
-    // tcp_sendmsg of a request carries the HTTP request line;
-    // continuation segments will return UNKNOWN and we keep the
-    // method from the first segment via BPF_NOEXIST below.
-    struct msghdr *msg = (struct msghdr *)PT_REGS_PARM2(ctx);
-    __u32 method = HTTP_METHOD_UNKNOWN;
-    if (msg)
-        method = detect_http_method(msg);
-
     // Look up existing active_request for this socket.  If one exists
-    // this is a continuation segment -- reuse its method and accumulate
-    // bytes into the same stats key.
+    // this is a continuation segment -- accumulate bytes sent.
     __u64 sk_key = (__u64)sk;
     struct active_request *existing =
         bpf_map_lookup_elem(&active_requests, &sk_key);
     if (existing) {
-        // Continuation of an existing request -- keep original method
-        // and timestamp, just accumulate bytes.
-        struct stats_key skey = {};
-        skey.dest_ip = existing->dest_ip;
-        skey.method  = existing->method;
-        record_send_bytes(&skey, size);
+        __sync_fetch_and_add(&existing->total_bytes_sent, size);
         return 0;
     }
 
-    // New request on this socket -- record method and timestamp.
-    struct stats_key skey = {};
-    skey.dest_ip = dest_ip;
-    skey.method  = method;
-    record_send_bytes(&skey, size);
-
+    // New request on this socket -- record timestamp and first send size.
     struct active_request req = {};
-    req.send_time_ns = bpf_ktime_get_ns();
-    req.dest_ip      = dest_ip;
-    req.send_size    = size;
-    req.method       = method;
+    req.send_time_ns    = bpf_ktime_get_ns();
+    req.dest_ip         = dest_ip;
+    req.total_bytes_sent = size;
 
     bpf_map_update_elem(&active_requests, &sk_key, &req, BPF_NOEXIST);
     return 0;
@@ -380,13 +297,21 @@ int tcp_cleanup_rbuf_entry(struct pt_regs *ctx)
     __u64 now = bpf_ktime_get_ns();
     __u64 latency_ns = now - req->send_time_ns;
 
+    // Classify the request based on total bytes sent vs received.
+    __u64 total_sent = req->total_bytes_sent;
+    __u64 total_recv = (__u64)copied;
+    __u32 method = classify_method(total_sent, total_recv);
+
     struct stats_key skey = {};
     skey.dest_ip = req->dest_ip;
-    skey.method  = req->method;
-    record_recv(&skey, latency_ns, (__u64)copied);
+    skey.method  = method;
+
+    // Record send bytes into the classified method bucket.
+    record_send_bytes(&skey, total_sent);
+    record_recv(&skey, latency_ns, total_recv);
 
     // Delete the entry so the next tcp_sendmsg (new HTTP request)
-    // creates a fresh entry with a new method and timestamp.
+    // creates a fresh entry with a new timestamp.
     bpf_map_delete_elem(&active_requests, &sk_key);
     return 0;
 }
@@ -411,11 +336,11 @@ int tcp_retransmit_entry(struct pt_regs *ctx)
     if (!is_objstore_server(dest_ip))
         return 0;
 
-    // Retransmits are not associated with a specific HTTP method,
-    // so we use HTTP_METHOD_UNKNOWN (0) as the method key.
+    // Retransmits are not associated with a specific method,
+    // so we use METHOD_OTHER (0) as the method key.
     struct stats_key skey = {};
     skey.dest_ip = dest_ip;
-    skey.method  = HTTP_METHOD_UNKNOWN;
+    skey.method  = METHOD_OTHER;
     struct latency_stats *stats =
         bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
     if (stats) {

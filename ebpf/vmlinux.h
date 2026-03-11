@@ -90,12 +90,6 @@ struct sock {
     struct sock_common __sk_common;
 };
 
-// msghdr and iov_iter are accessed via raw bpf_probe_read_kernel
-// in detect_http_method() because iov_iter field names changed
-// between kernel 5.15 ("iov", "type") and 6.x ("__iov", "iter_type").
-// We only need msghdr as a pointer target for PT_REGS_PARM2.
-struct msghdr;
-
 // -----------------------------------------------------------------------
 // Block layer types needed by disk_latency.c
 // -----------------------------------------------------------------------

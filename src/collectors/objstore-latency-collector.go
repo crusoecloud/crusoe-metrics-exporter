@@ -20,20 +20,20 @@ var objstoreLatencyBPF []byte
 
 // ObjStoreLatencyCollector monitors object store request latency using eBPF kprobes
 type ObjStoreLatencyCollector struct {
-	objs            *ebpf.Collection
-	sendLink        link.Link
-	recvLink        link.Link
-	retransmitLink  link.Link
-	latencyDesc     *prometheus.Desc
-	requestsDesc    *prometheus.Desc
-	retransmitDesc  *prometheus.Desc
-	bytesSentDesc   *prometheus.Desc
-	bytesRecvDesc   *prometheus.Desc
-	latencyHistDesc *prometheus.Desc
-	objStoreEndpoints   map[uint32]bool // IP addresses of object store endpoints (network byte order)
-	endpointMutex sync.RWMutex
-	filterIPs     []string    // IP filter strings (for testing)
-	filterNets    []*net.IPNet // Parsed CIDR networks (for testing)
+	objs              *ebpf.Collection
+	sendLink          link.Link
+	recvLink          link.Link
+	retransmitLink    link.Link
+	latencyDesc       *prometheus.Desc
+	requestsDesc      *prometheus.Desc
+	retransmitDesc    *prometheus.Desc
+	bytesSentDesc     *prometheus.Desc
+	bytesRecvDesc     *prometheus.Desc
+	latencyHistDesc   *prometheus.Desc
+	objStoreEndpoints map[uint32]bool // IP addresses of object store endpoints (network byte order)
+	endpointMutex     sync.RWMutex
+	filterIPs         []string     // IP filter strings (for testing)
+	filterNets        []*net.IPNet // Parsed CIDR networks (for testing)
 }
 
 // NewObjStoreLatencyCollector creates a new object store latency collector
@@ -42,13 +42,13 @@ type ObjStoreLatencyCollector struct {
 func NewObjStoreLatencyCollector(filterIPs []string, targetPort uint16) (*ObjStoreLatencyCollector, error) {
 	c := &ObjStoreLatencyCollector{
 		latencyDesc: prometheus.NewDesc(
-			MetricPrefix + "objectstore_latency_seconds",
+			MetricPrefix+"objectstore_latency_seconds",
 			"Object store request latency in seconds",
 			[]string{"endpoint", "operation"},
 			nil,
 		),
 		requestsDesc: prometheus.NewDesc(
-			MetricPrefix + "objectstore_requests_total",
+			MetricPrefix+"objectstore_requests_total",
 			"Total number of object store requests",
 			[]string{"endpoint", "operation"},
 			nil,
@@ -78,7 +78,7 @@ func NewObjStoreLatencyCollector(filterIPs []string, targetPort uint16) (*ObjSto
 			nil,
 		),
 		objStoreEndpoints: make(map[uint32]bool),
-		filterIPs:   filterIPs,
+		filterIPs:         filterIPs,
 	}
 
 	// Parse filter IPs if provided
@@ -291,7 +291,6 @@ func (c *ObjStoreLatencyCollector) Close() error {
 	return nil
 }
 
-
 // Describe implements prometheus.Collector
 func (c *ObjStoreLatencyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.latencyDesc
@@ -406,22 +405,18 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 		totalEntries, filteredEntries, totalEntries-filteredEntries)
 }
 
-// httpMethodToString maps eBPF HTTP_METHOD_* constants to label strings.
-// Must match the #define values in ebpf/objstore_latency.c.
+// httpMethodToString maps eBPF METHOD_* constants to Prometheus label strings.
+// Must match the #define values in ebpf/objstore_latency.c:
+//
+//	METHOD_OTHER=0, METHOD_GET=1, METHOD_PUT=2
 func httpMethodToString(method uint32) string {
 	switch method {
 	case 1:
 		return "GET"
 	case 2:
 		return "PUT"
-	case 3:
-		return "POST"
-	case 4:
-		return "DELETE"
-	case 5:
-		return "HEAD"
 	default:
-		return "unknown"
+		return "OTHER"
 	}
 }
 
