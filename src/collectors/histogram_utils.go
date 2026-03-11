@@ -135,21 +135,21 @@ func NewVolumeMapping() *VolumeMapping {
 func (vm *VolumeMapping) UpdateMapping(newMapping map[string]string) {
 	vm.mutex.Lock()
 	defer vm.mutex.Unlock()
-	
+
 	// Convert simple IP->volume mapping to IP->[]VolumeEntry
 	vm.mapping = make(map[string][]VolumeEntry)
-	
+
 	for ip, volumeID := range newMapping {
 		// Create export path from volume ID
 		exportPath := "/volumes/" + volumeID
 		exportPathHash := hashExportPath(exportPath)
-		
+
 		entry := VolumeEntry{
 			ExportPath:     exportPath,
 			VolumeID:       volumeID,
 			ExportPathHash: exportPathHash,
 		}
-		
+
 		vm.mapping[ip] = append(vm.mapping[ip], entry)
 	}
 }
@@ -158,12 +158,12 @@ func (vm *VolumeMapping) UpdateMapping(newMapping map[string]string) {
 func (vm *VolumeMapping) GetVolumeID(ip string) string {
 	vm.mutex.RLock()
 	defer vm.mutex.RUnlock()
-	
+
 	entries := vm.mapping[ip]
 	if len(entries) == 0 {
 		return ""
 	}
-	
+
 	// Return the first volume ID for backward compatibility
 	return entries[0].VolumeID
 }
@@ -172,14 +172,14 @@ func (vm *VolumeMapping) GetVolumeID(ip string) string {
 func (vm *VolumeMapping) GetVolumeIDByHash(ip string, exportPathHash uint64) string {
 	vm.mutex.RLock()
 	defer vm.mutex.RUnlock()
-	
+
 	entries := vm.mapping[ip]
 	for _, entry := range entries {
 		if entry.ExportPathHash == exportPathHash {
 			return entry.VolumeID
 		}
 	}
-	
+
 	return ""
 }
 
@@ -187,7 +187,7 @@ func (vm *VolumeMapping) GetVolumeIDByHash(ip string, exportPathHash uint64) str
 func (vm *VolumeMapping) GetAllMappings() map[string][]VolumeEntry {
 	vm.mutex.RLock()
 	defer vm.mutex.RUnlock()
-	
+
 	result := make(map[string][]VolumeEntry, len(vm.mapping))
 	for k, v := range vm.mapping {
 		result[k] = append([]VolumeEntry{}, v...)
@@ -215,13 +215,13 @@ var diskHistogramBucketBoundaries = [20]float64{
 }
 
 // Object store latency histogram bucket upper bounds in seconds.
-// 20 geometric buckets from 0.1ms to 25ms.
+// 20 geometric buckets from 1ms to 1000ms (ratio ~1.468).
 // Must match the eBPF bucket boundaries in objstore_latency.c.
 var objstoreHistogramBucketBoundaries = [20]float64{
-	0.000100, 0.000134, 0.000179, 0.000239, 0.000320,
-	0.000428, 0.000572, 0.000765, 0.001022, 0.001367,
-	0.001828, 0.002445, 0.003270, 0.004372, 0.005847,
-	0.007818, 0.010455, 0.013981, 0.018695, 0.025000,
+	0.001000, 0.001468, 0.002154, 0.003162, 0.004642,
+	0.006813, 0.010000, 0.014678, 0.021544, 0.031623,
+	0.046416, 0.068129, 0.100000, 0.146780, 0.215443,
+	0.316228, 0.464159, 0.681292, 1.000000, 1.468000,
 }
 
 // histogramToBuckets converts a fixed-size eBPF histogram array and its
