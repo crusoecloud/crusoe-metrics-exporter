@@ -91,9 +91,9 @@ func TestIPConversion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := uint32ToIP(tt.ipUint32)
+			result := ipUint32ToString(tt.ipUint32)
 			if result != tt.expected {
-				t.Errorf("uint32ToIP(0x%08X) = %s, want %s", tt.ipUint32, result, tt.expected)
+				t.Errorf("ipUint32ToString(0x%08X) = %s, want %s", tt.ipUint32, result, tt.expected)
 			}
 		})
 	}
@@ -152,12 +152,12 @@ func TestObjStoreMetricsWithRealIPs(t *testing.T) {
 
 	for metric := range ch {
 		metricCount++
-		
+
 		// Get metric description to check labels
 		desc := metric.Desc()
 		if desc != nil {
 			descString := desc.String()
-			
+
 			// Check if metric contains expected IP in labels
 			if strings.Contains(descString, expectedIP) {
 				realIPFound = true
@@ -229,12 +229,12 @@ func TestObjStoreMultipleEndpoints(t *testing.T) {
 
 	for metric := range ch {
 		metricCount++
-		
+
 		// Get metric description to check labels
 		desc := metric.Desc()
 		if desc != nil {
 			descString := desc.String()
-			
+
 			// Check if metric contains any of the expected IPs in labels
 			for _, expectedIP := range testIPs {
 				if strings.Contains(descString, expectedIP) {
@@ -300,14 +300,14 @@ func TestObjStoreIPByteOrderConversion(t *testing.T) {
 			expected: 0x0a003f64,
 		},
 		{
-			name:     "IP 10.234.1.180", 
+			name:     "IP 10.234.1.180",
 			ipString: "10.234.1.180",
 			// 10.234.1.180 in little-endian: 0xb401ea0a
 			expected: 0xb401ea0a,
 		},
 		{
 			name:     "IP 10.234.1.132",
-			ipString: "10.234.1.132", 
+			ipString: "10.234.1.132",
 			// 10.234.1.132 in little-endian: 0x8401ea0a
 			expected: 0x8401ea0a,
 		},
@@ -332,18 +332,18 @@ func TestObjStoreIPByteOrderConversion(t *testing.T) {
 
 			// Verify the byte order is correct
 			if ipUint32 != tc.expected {
-				t.Errorf("IP %s conversion: got 0x%08x, expected 0x%08x", 
+				t.Errorf("IP %s conversion: got 0x%08x, expected 0x%08x",
 					tc.ipString, ipUint32, tc.expected)
 			}
 
 			// Also verify it's NOT big-endian (which would be wrong)
 			bigEndianValue := binary.BigEndian.Uint32(ipv4)
 			if ipUint32 == bigEndianValue {
-				t.Errorf("IP %s: little-endian and big-endian values are the same (0x%08x), this is suspicious", 
+				t.Errorf("IP %s: little-endian and big-endian values are the same (0x%08x), this is suspicious",
 					tc.ipString, ipUint32)
 			}
 
-			t.Logf("✅ IP %s: little-endian 0x%08x (correct), big-endian 0x%08x (would be wrong)", 
+			t.Logf("✅ IP %s: little-endian 0x%08x (correct), big-endian 0x%08x (would be wrong)",
 				tc.ipString, ipUint32, bigEndianValue)
 		})
 	}
@@ -352,7 +352,7 @@ func TestObjStoreIPByteOrderConversion(t *testing.T) {
 // TestObjStoreIPConversionConsistency tests that object store collector uses consistent byte order
 func TestObjStoreIPConversionConsistency(t *testing.T) {
 	testIP := "100.63.0.10"
-	
+
 	// Parse IP once
 	parsedIP := net.ParseIP(testIP)
 	if parsedIP == nil {
@@ -369,25 +369,25 @@ func TestObjStoreIPConversionConsistency(t *testing.T) {
 
 	// They should be different for a non-symmetric IP
 	if littleEndianValue == bigEndianValue {
-		t.Errorf("Little-endian and big-endian values are the same (0x%08x) for IP %s", 
+		t.Errorf("Little-endian and big-endian values are the same (0x%08x) for IP %s",
 			littleEndianValue, testIP)
 	}
 
 	// Verify little-endian is what we expect
 	expectedLittleEndian := uint32(0x0a003f64) // 100.63.0.10 in little-endian
 	if littleEndianValue != expectedLittleEndian {
-		t.Errorf("Little-endian conversion: got 0x%08x, expected 0x%08x", 
+		t.Errorf("Little-endian conversion: got 0x%08x, expected 0x%08x",
 			littleEndianValue, expectedLittleEndian)
 	}
 
-	t.Logf("✅ IP %s: little-endian 0x%08x, big-endian 0x%08x", 
+	t.Logf("✅ IP %s: little-endian 0x%08x, big-endian 0x%08x",
 		testIP, littleEndianValue, bigEndianValue)
 }
 
 // TestObjStoreFilteringVsMapPopulationConsistency tests that filtering and eBPF map use same byte order
 func TestObjStoreFilteringVsMapPopulationConsistency(t *testing.T) {
 	testIP := "100.63.0.10"
-	
+
 	// Parse IP once
 	parsedIP := net.ParseIP(testIP)
 	if parsedIP == nil {
@@ -406,14 +406,14 @@ func TestObjStoreFilteringVsMapPopulationConsistency(t *testing.T) {
 
 	// They should be identical
 	if filteringValue != mapValue {
-		t.Errorf("Inconsistent byte order: filtering uses 0x%08x, eBPF map uses 0x%08x", 
+		t.Errorf("Inconsistent byte order: filtering uses 0x%08x, eBPF map uses 0x%08x",
 			filteringValue, mapValue)
 	}
 
 	// Verify they're both little-endian
 	expectedValue := uint32(0x0a003f64) // 100.63.0.10 in little-endian
 	if filteringValue != expectedValue || mapValue != expectedValue {
-		t.Errorf("Both should be 0x%08x: filtering=0x%08x, eBPF map=0x%08x", 
+		t.Errorf("Both should be 0x%08x: filtering=0x%08x, eBPF map=0x%08x",
 			expectedValue, filteringValue, mapValue)
 	}
 

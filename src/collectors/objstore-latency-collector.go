@@ -386,7 +386,7 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			operation,
 		)
 
-		histBuckets, histCount, histSum := objstoreHistogramToBuckets(value.Histogram)
+		histBuckets, histCount, histSum := histogramToBuckets(value.Histogram, objstoreHistogramBucketBoundaries)
 		ch <- prometheus.MustNewConstHistogram(
 			c.latencyHistDesc,
 			histCount,
@@ -418,17 +418,6 @@ func httpMethodToString(method uint32) string {
 	default:
 		return "OTHER"
 	}
-}
-
-// uint32ToIP converts a uint32 IP address to a string
-// Exported for testing
-func uint32ToIP(ip uint32) string {
-	// eBPF reads kernel's network byte order (big endian) into uint32
-	// On little-endian hosts (x86_64), this reverses the bytes
-	// We need to reverse them back to get the correct IP
-	ipBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(ipBytes, ip)
-	return net.IP(ipBytes).String()
 }
 
 // matchesTargetIP checks if an IP matches any configured object store endpoint

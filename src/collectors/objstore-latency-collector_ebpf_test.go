@@ -18,9 +18,9 @@ func TestEBPFMapsExist(t *testing.T) {
 
 	// Maps that the Go code references
 	requiredMaps := []string{
-		"config_map",       // Used in configurePort()
-		"active_requests",  // Internal eBPF map for tracking requests
-		"objstore_latency_by_ip",    // Used in Collect()
+		"config_map",             // Used in configurePort()
+		"active_requests",        // Internal eBPF map for tracking requests
+		"objstore_latency_by_ip", // Used in Collect()
 	}
 
 	// Get actual map names from the eBPF program
@@ -49,9 +49,9 @@ func TestEBPFProgramsExist(t *testing.T) {
 
 	// Programs that the Go code references (from attachKprobes)
 	requiredPrograms := []string{
-		"tcp_sendmsg_entry",  // Kprobe for tcp_sendmsg
-		"tcp_recvmsg_entry",  // Kprobe for tcp_recvmsg
-		"tcp_recvmsg_exit",   // Kretprobe for tcp_recvmsg
+		"tcp_sendmsg_entry",      // Kprobe for tcp_sendmsg
+		"tcp_cleanup_rbuf_entry", // Kprobe for tcp_cleanup_rbuf
+		"tcp_retransmit_entry",   // Kprobe for tcp_retransmit_skb
 	}
 
 	// Get actual program names from the eBPF program

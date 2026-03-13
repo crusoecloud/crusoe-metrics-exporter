@@ -21,17 +21,17 @@ var diskLatencyBPF []byte
 
 // DiskLatencyCollector monitors disk I/O latency and throughput using eBPF tracepoints
 type DiskLatencyCollector struct {
-	objs            *ebpf.Collection
-	ioStartLink     link.Link
-	ioDoneLink      link.Link
-	readsDesc       *prometheus.Desc
-	writesDesc      *prometheus.Desc
-	readBytesDesc   *prometheus.Desc
-	writeBytesDesc  *prometheus.Desc
-	readLatencyDesc *prometheus.Desc
+	objs             *ebpf.Collection
+	ioStartLink      link.Link
+	ioDoneLink       link.Link
+	readsDesc        *prometheus.Desc
+	writesDesc       *prometheus.Desc
+	readBytesDesc    *prometheus.Desc
+	writeBytesDesc   *prometheus.Desc
+	readLatencyDesc  *prometheus.Desc
 	writeLatencyDesc *prometheus.Desc
-	readHistDesc    *prometheus.Desc
-	writeHistDesc   *prometheus.Desc
+	readHistDesc     *prometheus.Desc
+	writeHistDesc    *prometheus.Desc
 	collectionErrors *prometheus.Desc
 }
 
@@ -211,7 +211,7 @@ func getDeviceName(deviceID uint32) string {
 	// If not in cache, try to resolve it dynamically
 	major := deviceID >> 8
 	minor := deviceID & 0xFF
-	
+
 	// Try to find the device in /sys/block
 	sysBlockPath := "/sys/block"
 	entries, err := os.ReadDir(sysBlockPath)
@@ -272,16 +272,16 @@ func CalculateDiskPercentiles(histogram [20]uint64, totalOps uint64) (p50, p90, 
 	var cumulative uint64
 	for i, count := range histogram {
 		cumulative += count
-		
+
 		// Calculate percentile using bucket midpoint
 		midpoint := boundaries[i]
 		if i > 0 {
 			midpoint = (boundaries[i-1] + boundaries[i]) / 2
 		}
-		
+
 		// Convert to seconds for Prometheus
 		midpointSeconds := midpoint / 1000.0
-		
+
 		// Check if we've reached the percentiles
 		if p50 == 0 && cumulative >= totalOps*50/100 {
 			p50 = midpointSeconds
@@ -335,14 +335,14 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 	// Iterate over all entries in the map
 	var key uint32
 	var value struct {
-		ReadCount            uint64
-		WriteCount           uint64
-		ReadBytes            uint64
-		WriteBytes           uint64
-		TotalReadLatencyNs   uint64
-		TotalWriteLatencyNs  uint64
-		ReadHistogram        [20]uint64
-		WriteHistogram       [20]uint64
+		ReadCount           uint64
+		WriteCount          uint64
+		ReadBytes           uint64
+		WriteBytes          uint64
+		TotalReadLatencyNs  uint64
+		TotalWriteLatencyNs uint64
+		ReadHistogram       [20]uint64
+		WriteHistogram      [20]uint64
 	}
 
 	totalEntries := 0
@@ -350,10 +350,10 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 	iter := statsMap.Iterate()
 	for iter.Next(&key, &value) {
 		totalEntries++
-		
+
 		// Get device name from device ID
 		deviceName := getDeviceName(key)
-		
+
 		// Only process virtual disks (should already be filtered by eBPF, but double-check)
 		if !strings.HasPrefix(deviceName, "vd") {
 			filteredEntries++
@@ -409,7 +409,7 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 		// Emit read histogram
 		if value.ReadCount > 0 {
-			readBuckets, readCount, readSum := diskHistogramToBuckets(value.ReadHistogram)
+			readBuckets, readCount, readSum := histogramToBuckets(value.ReadHistogram, diskHistogramBucketBoundaries)
 			ch <- prometheus.MustNewConstHistogram(
 				c.readHistDesc,
 				readCount,
@@ -421,7 +421,7 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 		// Emit write histogram
 		if value.WriteCount > 0 {
-			writeBuckets, writeCount, writeSum := diskHistogramToBuckets(value.WriteHistogram)
+			writeBuckets, writeCount, writeSum := histogramToBuckets(value.WriteHistogram, diskHistogramBucketBoundaries)
 			ch <- prometheus.MustNewConstHistogram(
 				c.writeHistDesc,
 				writeCount,
@@ -438,7 +438,7 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	log.Debugf("Disk metrics collection: %d total entries, %d filtered out, %d emitted", 
+	log.Debugf("Disk metrics collection: %d total entries, %d filtered out, %d emitted",
 		totalEntries, filteredEntries, totalEntries-filteredEntries)
 }
 

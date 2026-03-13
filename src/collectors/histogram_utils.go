@@ -248,48 +248,6 @@ func histogramToBuckets(histogram [HISTOGRAM_BUCKETS]uint64, boundaries [HISTOGR
 	return
 }
 
-// objstoreHistogramToBuckets is like histogramToBuckets but for the object
-// store collector's 20-bucket layout (0.1ms to 25ms).
-func objstoreHistogramToBuckets(histogram [20]uint64) (buckets map[float64]uint64, count uint64, sum float64) {
-	buckets = make(map[float64]uint64, 20)
-	var cumulative uint64
-	for i := 0; i < 20; i++ {
-		cumulative += histogram[i]
-		buckets[objstoreHistogramBucketBoundaries[i]] = cumulative
-
-		var midpoint float64
-		if i == 0 {
-			midpoint = objstoreHistogramBucketBoundaries[i] / 2
-		} else {
-			midpoint = (objstoreHistogramBucketBoundaries[i-1] + objstoreHistogramBucketBoundaries[i]) / 2
-		}
-		sum += float64(histogram[i]) * midpoint
-	}
-	count = cumulative
-	return
-}
-
-// diskHistogramToBuckets is like histogramToBuckets but for the disk
-// collector's 20-bucket layout which uses different boundaries.
-func diskHistogramToBuckets(histogram [20]uint64) (buckets map[float64]uint64, count uint64, sum float64) {
-	buckets = make(map[float64]uint64, 20)
-	var cumulative uint64
-	for i := 0; i < 20; i++ {
-		cumulative += histogram[i]
-		buckets[diskHistogramBucketBoundaries[i]] = cumulative
-
-		var midpoint float64
-		if i == 0 {
-			midpoint = diskHistogramBucketBoundaries[i] / 2
-		} else {
-			midpoint = (diskHistogramBucketBoundaries[i-1] + diskHistogramBucketBoundaries[i]) / 2
-		}
-		sum += float64(histogram[i]) * midpoint
-	}
-	count = cumulative
-	return
-}
-
 // ipUint32ToString converts a uint32 IP address to a string
 func ipUint32ToString(ip uint32) string {
 	ipBytes := make([]byte, 4)
