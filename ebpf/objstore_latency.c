@@ -53,7 +53,7 @@ struct active_request {
     __u64 total_bytes_sent;  // accumulated across all tcp_sendmsg calls
     __u64 total_bytes_recv;  // accumulated across all tcp_cleanup_rbuf calls
     __u32 dest_ip;
-    __u32 _pad;
+    __u32 retransmit_count;  // retransmits during this request
 };
 
 // Latency statistics structure
@@ -191,6 +191,7 @@ static __always_inline void finalize_request(struct active_request *req)
         __sync_fetch_and_add(&stats->total_latency_ns, latency_ns);
         __sync_fetch_and_add(&stats->bytes_sent, req->total_bytes_sent);
         __sync_fetch_and_add(&stats->bytes_recv, req->total_bytes_recv);
+        __sync_fetch_and_add(&stats->retransmit_count, req->retransmit_count);
         update_objstore_histogram(stats->histogram, latency_ns);
     } else {
         struct latency_stats new_stats = {};
@@ -198,6 +199,7 @@ static __always_inline void finalize_request(struct active_request *req)
         new_stats.total_latency_ns = latency_ns;
         new_stats.bytes_sent = req->total_bytes_sent;
         new_stats.bytes_recv = req->total_bytes_recv;
+        new_stats.retransmit_count = req->retransmit_count;
         update_objstore_histogram(new_stats.histogram, latency_ns);
         bpf_map_update_elem(&objstore_latency_by_ip, &skey,
                             &new_stats, BPF_NOEXIST);
@@ -330,8 +332,9 @@ int tcp_cleanup_rbuf_entry(struct pt_regs *ctx)
 
 // tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 //
-// Fires on every TCP retransmission.  We check if the socket targets a
-// known object store server IP and increment the per-IP retransmit counter.
+// Fires on every TCP retransmission.  We accumulate retransmits in the
+// active request so they get attributed to the correct operation
+// (PUT/GET/OTHER) when the request is finalized.
 SEC("kprobe/tcp_retransmit_skb")
 int tcp_retransmit_entry(struct pt_regs *ctx)
 {
@@ -343,26 +346,13 @@ int tcp_retransmit_entry(struct pt_regs *ctx)
     if (family != AF_INET)
         return 0;
 
-    __u32 dest_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
-
-    if (!is_objstore_server(dest_ip))
+    __u64 sk_key = (__u64)sk;
+    struct active_request *req =
+        bpf_map_lookup_elem(&active_requests, &sk_key);
+    if (!req)
         return 0;
 
-    // Retransmits are not associated with a specific method,
-    // so we use METHOD_OTHER (0) as the method key.
-    struct stats_key skey = {};
-    skey.dest_ip = dest_ip;
-    skey.method  = METHOD_OTHER;
-    struct latency_stats *stats =
-        bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
-    if (stats) {
-        __sync_fetch_and_add(&stats->retransmit_count, 1);
-    } else {
-        struct latency_stats new_stats = {};
-        new_stats.retransmit_count = 1;
-        bpf_map_update_elem(&objstore_latency_by_ip, &skey,
-                            &new_stats, BPF_NOEXIST);
-    }
+    __sync_fetch_and_add(&req->retransmit_count, 1);
     return 0;
 }
 

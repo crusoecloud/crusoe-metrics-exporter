@@ -132,7 +132,7 @@ spec:
           readOnly: true
         - mountPath: /etc/reloader
           name: reloader-config
-      - image: registry.gitlab.com/crusoeenergy/infrastructure/sre/third-party/crusoe-metrics-exporter:0.0.48
+      - image: registry.gitlab.com/crusoeenergy/infrastructure/sre/third-party/crusoe-metrics-exporter:0.0.49
         imagePullPolicy: IfNotPresent
         name: crusoe-metrics-exporter
         env:
