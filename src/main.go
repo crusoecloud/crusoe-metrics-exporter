@@ -5,6 +5,9 @@ import (
 	"metrics-exporter/src/log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -16,28 +19,136 @@ func main() {
 		port = "9500"
 	}
 
-	diskStatsPath := os.Getenv("DISKSTATS_PATH")
-	if diskStatsPath == "" {
-		diskStatsPath = "/host/proc/diskstats"
+	// HOST_PROC_PATH is the root of the host's /proc filesystem.
+	// In containers it is typically /host/proc (mounted from the host).
+	// On bare metal it is just /proc.
+	hostProcPath := os.Getenv("HOST_PROC_PATH")
+	if hostProcPath == "" {
+		if _, err := os.Stat("/host/proc/1/mounts"); err == nil {
+			hostProcPath = "/host/proc"
+		} else {
+			hostProcPath = "/proc"
+		}
+	}
+	log.Infof("Host proc path: %s", hostProcPath)
+
+	// Disk I/O latency collector (eBPF-based with histograms and percentiles)
+	diskLatencyCollector, err := collectors.NewDiskLatencyCollector()
+	if err != nil {
+		log.Errorf("Failed to create disk latency collector: %v (continuing without disk metrics)", err)
+	} else {
+		prometheus.MustRegister(diskLatencyCollector)
+		defer diskLatencyCollector.Close()
+		log.Infof("eBPF disk latency collector enabled")
 	}
 
-	mountStatsPath := os.Getenv("MOUNTSTATS_PATH")
-	if mountStatsPath == "" {
-		// Try both possible locations
-		if _, err := os.Stat("/proc/self/mountstats"); err == nil {
-			mountStatsPath = "/proc/self/mountstats"
-		} else {
-			mountStatsPath = "/host/proc/self/mountstats"
+	// NFS latency collector (eBPF-based with volume ID resolution)
+	nfsServerIPs := []string{}
+	if ipsStr := os.Getenv("NFS_SERVER_IPS"); ipsStr != "" {
+		for _, ip := range strings.Split(ipsStr, ",") {
+			ip = strings.TrimSpace(ip)
+			if ip != "" {
+				nfsServerIPs = append(nfsServerIPs, ip)
+			}
 		}
 	}
 
-	// Create collectors
-	diskCollector := collectors.NewDiskStatsCollector(diskStatsPath)
-	nfsCollector := collectors.NewNFSStatsCollector(mountStatsPath)
+	protocols := []string{"tcp", "udp"}
+	if protosStr := os.Getenv("NFS_PROTOCOLS"); protosStr != "" {
+		protocols = []string{}
+		for _, proto := range strings.Split(protosStr, ",") {
+			proto = strings.TrimSpace(strings.ToLower(proto))
+			if proto == "tcp" || proto == "udp" {
+				protocols = append(protocols, proto)
+			}
+		}
+		if len(protocols) == 0 {
+			protocols = []string{"tcp", "udp"}
+		}
+	}
 
-	// Register collectors
-	prometheus.MustRegister(diskCollector)
-	prometheus.MustRegister(nfsCollector)
+	targetPorts := []uint16{2049}
+	if portsStr := os.Getenv("NFS_TARGET_PORTS"); portsStr != "" {
+		targetPorts = []uint16{}
+		for _, portStr := range strings.Split(portsStr, ",") {
+			if port, err := strconv.ParseUint(strings.TrimSpace(portStr), 10, 16); err == nil {
+				targetPorts = append(targetPorts, uint16(port))
+			}
+		}
+		if len(targetPorts) == 0 {
+			targetPorts = []uint16{2049}
+		}
+	}
+
+	mountRefreshInterval := 30 * time.Second
+	if intervalStr := os.Getenv("NFS_MOUNT_REFRESH_INTERVAL"); intervalStr != "" {
+		if interval, err := time.ParseDuration(intervalStr); err == nil {
+			mountRefreshInterval = interval
+		}
+	}
+
+	enableVolumeID := os.Getenv("NFS_ENABLE_VOLUME_ID") != "false"
+
+	hostMountsPath := hostProcPath + "/1/mounts"
+
+	nfsConfig := collectors.NFSConfig{
+		ServerIPs:            nfsServerIPs,
+		Protocols:            protocols,
+		TargetPorts:          targetPorts,
+		EnableVolumeID:       enableVolumeID,
+		MountRefreshInterval: mountRefreshInterval,
+		HostMountsPath:       hostMountsPath,
+	}
+
+	nfsCollector, err := collectors.NewNFSLatencyCollector(nfsConfig)
+	if err != nil {
+		log.Errorf("Failed to create NFS latency collector: %v (continuing without NFS metrics)", err)
+	} else {
+		prometheus.MustRegister(nfsCollector)
+		defer nfsCollector.Close()
+		log.Infof("NFS latency collector enabled - protocols: %v, ports: %v, volume_id: %v",
+			protocols, targetPorts, enableVolumeID)
+	}
+
+	// NFS stats collector (mountstats-based: RPC counts, RTT, exe time, backlog)
+	mountStatsPath := os.Getenv("MOUNTSTATS_PATH")
+	if mountStatsPath == "" {
+		mountStatsPath = hostProcPath + "/1/mountstats"
+	}
+	nfsStatsCollector := collectors.NewNFSStatsCollector(mountStatsPath)
+	prometheus.MustRegister(nfsStatsCollector)
+	log.Infof("NFS stats collector enabled (mountstats: %s)", mountStatsPath)
+
+	// Object store latency collector (eBPF-based)
+	objStoreIPs := []string{}
+	if ipsStr := os.Getenv("OBJSTORE_ENDPOINT_IPS"); ipsStr != "" {
+		for _, ip := range strings.Split(ipsStr, ",") {
+			ip = strings.TrimSpace(ip)
+			if ip != "" {
+				objStoreIPs = append(objStoreIPs, ip)
+			}
+		}
+	}
+
+	if len(objStoreIPs) > 0 {
+		objStorePort := uint16(443)
+		if portStr := os.Getenv("OBJSTORE_ENDPOINT_PORT"); portStr != "" {
+			if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
+				objStorePort = uint16(port)
+			} else {
+				log.Warnf("Invalid OBJSTORE_ENDPOINT_PORT '%s', using default 443", portStr)
+			}
+		}
+
+		objStoreCollector, err := collectors.NewObjStoreLatencyCollector(objStoreIPs, objStorePort)
+		if err != nil {
+			log.Errorf("Failed to create object store latency collector: %v (continuing without object store metrics)", err)
+		} else {
+			prometheus.MustRegister(objStoreCollector)
+			defer objStoreCollector.Close()
+			log.Infof("Object store latency collector enabled for IPs: %v, port: %d", objStoreIPs, objStorePort)
+		}
+	}
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +157,5 @@ func main() {
 	})
 
 	log.Infof("Starting metrics exporter on port %s", port)
-	log.Infof("Disk stats path: %s", diskStatsPath)
-	log.Infof("Mount stats path: %s", mountStatsPath)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
