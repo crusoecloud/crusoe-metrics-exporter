@@ -1,8 +1,25 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
+  annotations:
+    deprecated.daemonset.template.generation: "2"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"annotations":{"deprecated.daemonset.template.generation":"1","meta.helm.sh/release-name":"crusoe-watch-agent","meta.helm.sh/release-namespace":"crusoe-system"},"creationTimestamp":"2026-03-15T10:14:13Z","generation":1,"labels":{"app.kubernetes.io/component":"Agent","app.kubernetes.io/instance":"crusoe-watch-agent","app.kubernetes.io/managed-by":"Helm","app.kubernetes.io/name":"crusoe-watch-agent","app.kubernetes.io/version":"nightly-debian","helm.sh/chart":"vector-0.45.0"},"name":"crusoe-watch-agent","namespace":"crusoe-system","resourceVersion":"10464972","uid":"61ba1166-54ca-423a-8acd-33a45165f830"},"spec":{"revisionHistoryLimit":10,"selector":{"matchLabels":{"app.kubernetes.io/component":"Agent","app.kubernetes.io/instance":"crusoe-watch-agent","app.kubernetes.io/name":"crusoe-watch-agent"}},"template":{"metadata":{"annotations":{"checksum/config":"bdfc92c8eb74ec05fd4fce5c4e6c868e6745646c3d593aa0e75ae34a81f73fda"},"creationTimestamp":null,"labels":{"app.kubernetes.io/component":"Agent","app.kubernetes.io/instance":"crusoe-watch-agent","app.kubernetes.io/name":"crusoe-watch-agent","vector.dev/exclude":"true"}},"spec":{"containers":[{"args":["--config-dir","/etc/vector/"],"command":["/bin/sh","-c","export VM_ID=$(cat /host/sys/class/dmi/id/product_uuid) \u0026\u0026 /usr/bin/vector --config /etc/vector/vector.yaml --watch-config --watch-config-method poll --watch-config-poll-interval-seconds 30"],"env":[{"name":"VECTOR_LOG","value":"info"},{"name":"CRUSOE_MONITORING_TOKEN","valueFrom":{"secretKeyRef":{"key":"CRUSOE_MONITORING_TOKEN","name":"crusoe-monitoring-token"}}},{"name":"CHART_VERSION","valueFrom":{"configMapKeyRef":{"key":"chart-version","name":"crusoe-watch-agent-metadata"}}},{"name":"CHART_NAME","valueFrom":{"configMapKeyRef":{"key":"chart-name","name":"crusoe-watch-agent-metadata"}}},{"name":"VECTOR_SELF_NODE_NAME","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"spec.nodeName"}}},{"name":"VECTOR_SELF_POD_NAME","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"metadata.name"}}},{"name":"VECTOR_SELF_POD_NAMESPACE","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"metadata.namespace"}}},{"name":"PROCFS_ROOT","value":"/host/proc"},{"name":"SYSFS_ROOT","value":"/host/sys"}],"envFrom":[{"secretRef":{"name":"crusoe-secrets"}}],"image":"timberio/vector:nightly-debian","imagePullPolicy":"IfNotPresent","name":"vector","resources":{},"securityContext":{"privileged":true},"terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File","volumeMounts":[{"mountPath":"/vector-data-dir","name":"data"},{"mountPath":"/etc/vector/","name":"config","readOnly":true},{"mountPath":"/var/log/","name":"var-log","readOnly":true},{"mountPath":"/var/lib","name":"var-lib","readOnly":true},{"mountPath":"/host/proc","name":"procfs","readOnly":true},{"mountPath":"/host/sys","name":"sysfs","readOnly":true},{"mountPath":"/var/log/journal","name":"journal-logs","readOnly":true},{"mountPath":"/var/log/nvidia-bug-reports","name":"nvidia-bug-reports"},{"mountPath":"/etc/vector","name":"vector-config"},{"mountPath":"/etc/vector-base","name":"base-config","readOnly":true},{"mountPath":"/etc/reloader","name":"reloader-config","readOnly":true}]},{"env":[{"name":"NODE_NAME","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"spec.nodeName"}}}],"image":"ghcr.io/crusoecloud/crusoe-watch-agent/vector-config-reloader:v0.2.6","imagePullPolicy":"IfNotPresent","name":"vector-config-reloader","resources":{"requests":{"cpu":"50m","memory":"64Mi"}},"terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File","volumeMounts":[{"mountPath":"/etc/vector","name":"vector-config"},{"mountPath":"/etc/vector-base","name":"base-config","readOnly":true},{"mountPath":"/etc/reloader","name":"reloader-config"}]},{"env":[{"name":"HOST_PROC_PATH","value":"/host/proc"},{"name":"LOG_LEVEL","value":"info"},{"name":"OBJSTORE_ENDPOINT_PORT","value":"8080"},{"name":"OBJSTORE_ENDPOINT_IPS","value":"100.63.0.10,10.234.1.180,10.234.1.132,10.234.1.69,10.234.1.159"}],"image":"registry.gitlab.com/crusoeenergy/infrastructure/sre/third-party/crusoe-metrics-exporter:0.0.49","imagePullPolicy":"IfNotPresent","name":"crusoe-metrics-exporter","ports":[{"containerPort":9500,"name":"metrics","protocol":"TCP"}],"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"securityContext":{"privileged":true},"terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File","volumeMounts":[{"mountPath":"/host/proc","name":"procfs","readOnly":true},{"mountPath":"/sys/fs/bpf","name":"bpffs"}]}],"dnsPolicy":"ClusterFirst","hostNetwork":true,"imagePullSecrets":[{"name":"ccr-credentials"},{"name":"gitlab-registry"}],"restartPolicy":"Always","schedulerName":"default-scheduler","securityContext":{},"serviceAccount":"crusoe-watch-agent","serviceAccountName":"crusoe-watch-agent","terminationGracePeriodSeconds":60,"tolerations":[{"operator":"Exists"}],"volumes":[{"name":"config","projected":{"defaultMode":420,"sources":[{"configMap":{"name":"crusoe-watch-agent"}}]}},{"hostPath":{"path":"/var/lib/vector","type":""},"name":"data"},{"hostPath":{"path":"/var/log/","type":""},"name":"var-log"},{"hostPath":{"path":"/var/lib/","type":""},"name":"var-lib"},{"hostPath":{"path":"/proc","type":""},"name":"procfs"},{"hostPath":{"path":"/sys","type":""},"name":"sysfs"},{"hostPath":{"path":"/var/log/journal","type":""},"name":"journal-logs"},{"hostPath":{"path":"/var/log/nvidia-bug-reports","type":""},"name":"nvidia-bug-reports"},{"emptyDir":{},"name":"vector-config"},{"configMap":{"defaultMode":420,"name":"crusoe-watch-agent"},"name":"base-config"},{"configMap":{"defaultMode":420,"name":"vector-reloader-config"},"name":"reloader-config"},{"emptyDir":{},"name":"metrics-exporter-binary"},{"hostPath":{"path":"/sys/fs/bpf","type":"Directory"},"name":"bpffs"}]}},"updateStrategy":{"rollingUpdate":{"maxSurge":0,"maxUnavailable":1},"type":"RollingUpdate"}},"status":{"currentNumberScheduled":1,"desiredNumberScheduled":1,"numberAvailable":1,"numberMisscheduled":0,"numberReady":1,"observedGeneration":1,"updatedNumberScheduled":1}}
+    meta.helm.sh/release-name: crusoe-watch-agent
+    meta.helm.sh/release-namespace: crusoe-system
+  creationTimestamp: "2026-03-15T10:14:13Z"
+  generation: 2
+  labels:
+    app.kubernetes.io/component: Agent
+    app.kubernetes.io/instance: crusoe-watch-agent
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: crusoe-watch-agent
+    app.kubernetes.io/version: nightly-debian
+    helm.sh/chart: vector-0.45.0
   name: crusoe-watch-agent
   namespace: crusoe-system
+  resourceVersion: "10466451"
+  uid: 61ba1166-54ca-423a-8acd-33a45165f830
 spec:
   revisionHistoryLimit: 10
   selector:
@@ -13,9 +30,9 @@ spec:
   template:
     metadata:
       annotations:
-        crusoe.ai/port: "9500"
+        checksum/config: bdfc92c8eb74ec05fd4fce5c4e6c868e6745646c3d593aa0e75ae34a81f73fda
         crusoe.ai/scrape: "true"
-        kubectl.kubernetes.io/restartedAt: "2026-02-19T10:50:00Z"
+        crusoe.ai/port: "9500"
       creationTimestamp: null
       labels:
         app.kubernetes.io/component: Agent
@@ -31,10 +48,11 @@ spec:
         - /bin/sh
         - -c
         - export VM_ID=$(cat /host/sys/class/dmi/id/product_uuid) && /usr/bin/vector
-          --config /etc/vector/vector.yaml --watch-config
+          --config /etc/vector/vector.yaml --watch-config --watch-config-method poll
+          --watch-config-poll-interval-seconds 30
         env:
         - name: VECTOR_LOG
-          value: debug
+          value: info
         - name: CRUSOE_MONITORING_TOKEN
           valueFrom:
             secretKeyRef:
@@ -76,6 +94,8 @@ spec:
         imagePullPolicy: IfNotPresent
         name: vector
         resources: {}
+        securityContext:
+          privileged: true
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:
@@ -115,7 +135,7 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName
-        image: registry.eu-iceland1-a.ccr.crusoecloudcompute.com/crusoe-managed-exporter.7726ea7d/vector-config-reloader:v0.2.8
+        image: ghcr.io/crusoecloud/crusoe-watch-agent/vector-config-reloader:v0.2.6
         imagePullPolicy: IfNotPresent
         name: vector-config-reloader
         resources:
@@ -132,18 +152,18 @@ spec:
           readOnly: true
         - mountPath: /etc/reloader
           name: reloader-config
-      - image: registry.gitlab.com/crusoeenergy/infrastructure/sre/third-party/crusoe-metrics-exporter:0.0.49
-        imagePullPolicy: IfNotPresent
-        name: crusoe-metrics-exporter
-        env:
+      - env:
         - name: HOST_PROC_PATH
           value: /host/proc
         - name: LOG_LEVEL
-          value: debug
+          value: info
         - name: OBJSTORE_ENDPOINT_PORT
           value: "8080"
         - name: OBJSTORE_ENDPOINT_IPS
-          value: "100.63.0.10,10.234.1.180,10.234.1.132,10.234.1.69,10.234.1.159"
+          value: 100.63.0.10,10.234.1.180,10.234.1.132,10.234.1.69,10.234.1.159
+        image: registry.gitlab.com/crusoeenergy/infrastructure/sre/third-party/crusoe-metrics-exporter:0.0.49
+        imagePullPolicy: IfNotPresent
+        name: crusoe-metrics-exporter
         ports:
         - containerPort: 9500
           name: metrics
@@ -174,7 +194,9 @@ spec:
       securityContext: {}
       serviceAccount: crusoe-watch-agent
       serviceAccountName: crusoe-watch-agent
-      terminationGracePeriodSeconds: 6
+      terminationGracePeriodSeconds: 60
+      tolerations:
+      - operator: Exists
       volumes:
       - name: config
         projected:
@@ -237,5 +259,5 @@ status:
   numberAvailable: 1
   numberMisscheduled: 0
   numberReady: 1
-  observedGeneration: 3
+  observedGeneration: 2
   updatedNumberScheduled: 1
