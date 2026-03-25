@@ -14,24 +14,15 @@ COPY src/ ./src/
 COPY ebpf/ ./ebpf/
 
 # Determine target architecture for eBPF compilation
-# Docker buildx multi-platform builds run in containers with the target architecture
-# So uname -m will correctly reflect the target platform
-RUN echo "Detecting build architecture..." && \
-    echo "TARGETPLATFORM: ${TARGETPLATFORM:-unset}" && \
-    echo "TARGETARCH: ${TARGETARCH:-unset}" && \
-    # In multi-platform builds, uname -m reflects the target architecture
-    TARGETARCH=$(uname -m) && \
-    echo "Detected architecture from uname -m: $TARGETARCH" && \
-    if [ "$TARGETARCH" = "x86_64" ]; then \
+# Use Docker's TARGETARCH build arg (set automatically by buildx)
+ARG TARGETARCH
+RUN echo "Detecting build architecture: TARGETARCH=${TARGETARCH}" && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
         ARCH_DEFINE=__TARGET_ARCH_x86; \
-        echo "Using x86 architecture define"; \
-    elif [ "$TARGETARCH" = "aarch64" ]; then \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
         ARCH_DEFINE=__TARGET_ARCH_arm64; \
-        echo "Using arm64 architecture define"; \
     else \
         echo "Unsupported architecture: $TARGETARCH"; \
-        echo "Available environment variables:"; \
-        env | grep -E "(TARGET|PLATFORM|ARCH)" || echo "No architecture variables found"; \
         exit 1; \
     fi && \
     echo "Compiling eBPF programs for $TARGETARCH with $ARCH_DEFINE" && \
