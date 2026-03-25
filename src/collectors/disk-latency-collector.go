@@ -32,6 +32,8 @@ type DiskLatencyCollector struct {
 	writeLatencyDesc *prometheus.Desc
 	readHistDesc     *prometheus.Desc
 	writeHistDesc    *prometheus.Desc
+	readErrorsDesc   *prometheus.Desc
+	writeErrorsDesc  *prometheus.Desc
 	collectionErrors *prometheus.Desc
 }
 
@@ -139,6 +141,18 @@ func NewDiskLatencyCollector() (*DiskLatencyCollector, error) {
 		writeHistDesc: prometheus.NewDesc(
 			MetricPrefix+"disk_write_latency_seconds",
 			"Histogram of disk write latency in seconds",
+			[]string{"device"},
+			nil,
+		),
+		readErrorsDesc: prometheus.NewDesc(
+			MetricPrefix+"disk_read_errors_total",
+			"Total number of disk read errors",
+			[]string{"device"},
+			nil,
+		),
+		writeErrorsDesc: prometheus.NewDesc(
+			MetricPrefix+"disk_write_errors_total",
+			"Total number of disk write errors",
 			[]string{"device"},
 			nil,
 		),
@@ -319,6 +333,8 @@ func (c *DiskLatencyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.writeLatencyDesc
 	ch <- c.readHistDesc
 	ch <- c.writeHistDesc
+	ch <- c.readErrorsDesc
+	ch <- c.writeErrorsDesc
 	ch <- c.collectionErrors
 }
 
@@ -343,6 +359,8 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 		TotalWriteLatencyNs uint64
 		ReadHistogram       [20]uint64
 		WriteHistogram      [20]uint64
+		ReadErrorCount      uint64
+		WriteErrorCount     uint64
 	}
 
 	totalEntries := 0
@@ -430,6 +448,21 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 				deviceName,
 			)
 		}
+
+		// Emit error metrics
+		ch <- prometheus.MustNewConstMetric(
+			c.readErrorsDesc,
+			prometheus.CounterValue,
+			float64(value.ReadErrorCount),
+			deviceName,
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.writeErrorsDesc,
+			prometheus.CounterValue,
+			float64(value.WriteErrorCount),
+			deviceName,
+		)
 	}
 
 	if err := iter.Err(); err != nil {
