@@ -1,0 +1,256 @@
+data_dir: /vector-data-dir
+sinks:
+  cms_gateway_node_metrics:
+    auth:
+      strategy: bearer
+      token: ${CRUSOE_MONITORING_TOKEN}
+    batch:
+      max_bytes: 500000
+    compression: snappy
+    endpoint: https://cms-monitoring.crusoecloud.com/ingest
+    healthcheck:
+      enabled: false
+    inputs:
+    - enrich_node_metrics
+    - add_internal_labels
+    request:
+      concurrency: adaptive
+    tenant_id: cri:vm/${VM_ID}
+    tls:
+      verify_certificate: true
+      verify_hostname: true
+    type: prometheus_remote_write
+  crusoe_ingest:
+    auth:
+      strategy: bearer
+      token: ${CRUSOE_MONITORING_TOKEN}
+    batch:
+      max_bytes: 100000
+    compression: snappy
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    healthcheck:
+      enabled: false
+    inputs:
+    - enrich_logs
+    request:
+      headers:
+        X-Crusoe-Vm-Id: ${VM_ID:-unknown}
+    type: http
+    uri: https://cms-monitoring.crusoecloud.com/logs/ingest
+  crusoe_watch_agent_s7bkw_sink:
+    auth:
+      strategy: bearer
+      token: ${CRUSOE_MONITORING_TOKEN}
+    batch:
+      max_bytes: 500000
+    compression: snappy
+    endpoint: https://cms-monitoring.crusoecloud.com/ingest
+    healthcheck:
+      enabled: false
+    inputs:
+    - crusoe_watch_agent_s7bkw_transform
+    request:
+      concurrency: adaptive
+    tenant_id: cri:custom_metrics/${CRUSOE_CLUSTER_ID}
+    tls:
+      verify_certificate: true
+      verify_hostname: true
+    type: prometheus_remote_write
+  kube_state_metrics_sink:
+    auth:
+      strategy: bearer
+      token: ${CRUSOE_MONITORING_TOKEN}
+    batch:
+      max_bytes: 500000
+    compression: snappy
+    endpoint: https://cms-monitoring.crusoecloud.com/ingest
+    healthcheck:
+      enabled: false
+    inputs:
+    - enrich_kube_state_metrics
+    request:
+      concurrency: adaptive
+    tenant_id: cri:cmk/${CRUSOE_CLUSTER_ID}
+    tls:
+      verify_certificate: true
+      verify_hostname: true
+    type: prometheus_remote_write
+sources:
+  crusoe_watch_agent_s7bkw_scrape:
+    endpoints:
+    - http://172.27.49.145:9500/metrics
+    scrape_interval_secs: 30
+    scrape_timeout_secs: 21
+    type: prometheus_scrape
+  dmesg_logs:
+    command:
+    - cat
+    - /dev/kmsg
+    mode: streaming
+    type: exec
+  host_metrics:
+    collectors:
+    - cpu
+    - disk
+    - host
+    - memory
+    - network
+    - process
+    network:
+      devices:
+        excludes:
+        - lo*
+        includes:
+        - ens*
+    process:
+      processes:
+        includes:
+        - vector
+    scrape_interval_secs: 60
+    type: host_metrics
+  internal_metrics:
+    scrape_interval_secs: 60
+    type: internal_metrics
+  journald_logs:
+    journal_directory: /var/log/journal
+    type: journald
+  kube_state_metrics_scrape:
+    endpoints:
+    - http://10.234.1.180:8080/metrics
+    scrape_interval_secs: 60
+    scrape_timeout_secs: 42
+    type: prometheus_scrape
+  kubernetes_logs:
+    type: kubernetes_logs
+transforms:
+  add_internal_labels:
+    inputs:
+    - filter_internal_metrics
+    source: '.tags.cluster_id = "${CRUSOE_CLUSTER_ID}"
+
+      .tags.vm_id = "${VM_ID}"
+
+      .tags.crusoe_resource = "vm"
+
+      .tags.chart_name = "${CHART_NAME}"
+
+      .tags.chart_version = "${CHART_VERSION}"
+
+      '
+    type: remap
+  crusoe_watch_agent_s7bkw_transform:
+    drop_on_abort: true
+    inputs:
+    - crusoe_watch_agent_s7bkw_scrape
+    source: |-
+      .tags.nodepool = "ed2014e6-17f4-4be6-a3c9-140453153a1a"
+      .tags.cluster_id = "${CRUSOE_CLUSTER_ID}"
+      .tags.vm_id = "71087608-d4ac-456c-af04-4ce692613f13"
+      .tags.vm_instance_type = "c1a.4x"
+      if "" != "" { .tags.pod_id = "" }
+      .tags.crusoe_resource = "custom_metrics"
+      .tags.metrics_source = "custom-metrics"
+      .tags.pod_ip = "172.27.49.145"
+      .tags.pod_name = "crusoe-watch-agent-s7bkw"
+    type: remap
+  enrich_kube_state_metrics:
+    inputs:
+    - kube_state_metrics_scrape
+    source: '
+
+      .tags.cluster_id = "${CRUSOE_CLUSTER_ID}"
+
+      .tags.project_id = "${CRUSOE_PROJECT_ID}"
+
+      .tags.crusoe_resource = "cmk"
+
+      .tags.metrics_source = "kube-state-metrics"
+
+      '
+    type: remap
+  enrich_logs:
+    inputs:
+    - journald_logs
+    - dmesg_logs
+    - filter_crusoe_log_collector_logs
+    source: "\n.agent = \"crusoe-watch-agent\"\n.host = get_hostname!()\n.crusoe_cluster_id\
+      \ = \"${CRUSOE_CLUSTER_ID}\"\n\nif .kubernetes.pod_labels.app == \"crusoe-log-collector\"\
+      \ { \n    .log_source = \"crusoe-log-collector\"\n\n    # Parse JSON log format\
+      \ (efficient, no regex needed)\n    if exists(.message) {\n        parsed, err\
+      \ = parse_json(string!(.message))\n\n        if err == null {\n            #\
+      \ Extract level and message from JSON\n            if exists(parsed.level) {\n\
+      \                .level = string!(parsed.level)\n            }\n           \
+      \ if exists(parsed.message) {\n                .message = string!(parsed.message)\n\
+      \            }\n            # Note: parsed.timestamp exists but we use kubernetes\
+      \ timestamp\n        }\n    }\n}\n\nif .source_type == \"journald\" {\n    .log_source\
+      \ = \"journald\"\n    if .PRIORITY == \"0\" || .PRIORITY == \"1\" {\n      \
+      \  .level = \"error\"\n    } else if .PRIORITY == \"2\" || .PRIORITY== \"3\"\
+      \ {\n        .level = \"critical\"\n    } else if .PRIORITY == \"4\" || .PRIORITY\
+      \ == \"5\" {\n        .level = \"warning\"\n    } else if .PRIORITY == \"6\"\
+      \ {\n        .level = \"info\"\n    } else if .PRIORITY == \"7\" {\n       \
+      \ .level = \"debug\"\n    } else {\n        .level = \"undefined\"\n    }\n\
+      } else if .source_type == \"exec\" {\n    # Handle dmesg logs from exec source\
+      \ (cat /dev/kmsg)\n    .log_source = \"dmesg\"\n    # Parse kernel log level\
+      \ from /dev/kmsg format: <priority>,timestamp,sequence...;message\n    # Example:\
+      \ \"6,339,5140900,-;NET: Registered protocol family 10\"\n    msg_str = string!(.message)\n\
+      \n    # Extract priority using simple string split (faster than regex)\n   \
+      \ metadata_parts = split(msg_str, \",\", limit: 2)\n    priority = to_int(get(metadata_parts,\
+      \ [0]) ?? \"-1\") ?? -1\n\n    # Map kernel log levels using same logic as journald\
+      \ for consistency\n    if priority == 0 || priority == 1 {\n        .level =\
+      \ \"error\"\n    } else if priority == 2 || priority == 3 {\n        .level\
+      \ = \"critical\"\n    } else if priority == 4 || priority == 5 {\n        .level\
+      \ = \"warning\"\n    } else if priority == 6 {\n        .level = \"info\"\n\
+      \    } else if priority == 7 {\n        .level = \"debug\"\n    } else {\n \
+      \       .level = \"undefined\"\n    }\n\n    # Extract the actual message after\
+      \ the semicolon\n    msg_parts = split(msg_str, \";\", limit: 2)\n    if length(msg_parts)\
+      \ > 1 {\n        .message = get(msg_parts, [1]) ?? msg_str\n    }\n} else if\
+      \ .source_type == \"file\" {\n    .log_source = \"generic_file\"\n}\ndel(.source_type)\n\
+      \nif exists(.__REALTIME_TIMESTAMP) {\n    ._time = .__REALTIME_TIMESTAMP\n}\
+      \ else if exists(.timestamp) {\n    ._time = .timestamp\n}\n\nif exists(.message)\
+      \ {\n    ._msg = del(.message)\n}\n\n# Normalize level to lowercase\nif exists(.level)\
+      \ {\n  .level = downcase(string!(.level))\n} else {\n  .level = \"undefined\"\
+      \n}\n"
+    type: remap
+  enrich_node_metrics:
+    inputs:
+    - host_metrics
+    source: |2
+
+      .tags.nodepool = "ed2014e6-17f4-4be6-a3c9-140453153a1a"
+      .tags.cluster_id = "${CRUSOE_CLUSTER_ID}"
+      .tags.vm_id = "71087608-d4ac-456c-af04-4ce692613f13"
+      .tags.vm_instance_type = "c1a.4x"
+      .tags.node = "np-ed2014e6-2.eu-iceland1-a.compute.internal"
+      if "" != "" { .tags.pod_id = "" }
+      .tags.crusoe_resource = "vm"
+      .tags.metrics_source = "node-metrics"
+    type: remap
+  filter_crusoe_log_collector_logs:
+    condition:
+      source: '
+
+        .kubernetes.pod_namespace == "crusoe-system" && starts_with(string!(.kubernetes.pod_name),
+        "crusoe-log-collector")
+
+        '
+      type: vrl
+    inputs:
+    - kubernetes_logs
+    type: filter
+  filter_internal_metrics:
+    condition: "includes(\n    [\n        \"buffer_byte_size\",\n        \"buffer_discarded_events_total\"\
+      ,\n        \"buffer_events\",\n        \"buffer_received_events_total\",\n \
+      \       \"buffer_sent_events_total\",\n        \"build_info\",\n        \"component_discarded_events_total\"\
+      ,\n        \"component_errors_total\",\n        \"component_received_events_total\"\
+      ,\n        \"component_sent_events_total\",\n        \"config_reloaded\",\n\
+      \        \"connection_established_total\",\n        \"connection_send_errors_total\"\
+      ,\n        \"http_client_requests_sent_total\",\n        \"http_client_responses_total\"\
+      ,\n        \"internal_metrics_cardinality\",\n        \"open_connections\",\n\
+      \        \"open_files\",\n        \"uptime_seconds\",\n    ],\n    .name,\n\
+      )\n"
+    inputs:
+    - internal_metrics
+    type: filter

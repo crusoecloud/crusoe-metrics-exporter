@@ -46,6 +46,8 @@ struct disk_latency_stats {
     __u64 write_latency_ns;
     __u64 read_histogram[DISK_HISTOGRAM_BUCKETS];
     __u64 write_histogram[DISK_HISTOGRAM_BUCKETS];
+    __u64 read_error_count;   // I/O errors for reads
+    __u64 write_error_count;  // I/O errors for writes
 };
 
 // -----------------------------------------------------------------------
@@ -132,7 +134,8 @@ static __always_inline __u32 get_device_id(struct request *rq)
 }
 
 // Record a completed I/O operation in the stats map.
-static __always_inline void record_io(struct inflight_io *io, __u64 latency_ns)
+// error == 0 means success, non-zero means I/O error (blk_status_t).
+static __always_inline void record_io(struct inflight_io *io, __u64 latency_ns, __u8 error)
 {
     __u32 dev_id = io->device_id;
 
@@ -145,11 +148,15 @@ static __always_inline void record_io(struct inflight_io *io, __u64 latency_ns)
             __sync_fetch_and_add(&stats->write_bytes, io->data_len);
             __sync_fetch_and_add(&stats->write_latency_ns, latency_ns);
             update_disk_histogram(stats->write_histogram, latency_ns);
+            if (error != 0)
+                __sync_fetch_and_add(&stats->write_error_count, 1);
         } else {
             __sync_fetch_and_add(&stats->read_count, 1);
             __sync_fetch_and_add(&stats->read_bytes, io->data_len);
             __sync_fetch_and_add(&stats->read_latency_ns, latency_ns);
             update_disk_histogram(stats->read_histogram, latency_ns);
+            if (error != 0)
+                __sync_fetch_and_add(&stats->read_error_count, 1);
         }
     } else {
         struct disk_latency_stats new_stats = {};
@@ -158,11 +165,15 @@ static __always_inline void record_io(struct inflight_io *io, __u64 latency_ns)
             new_stats.write_bytes = io->data_len;
             new_stats.write_latency_ns = latency_ns;
             update_disk_histogram(new_stats.write_histogram, latency_ns);
+            if (error != 0)
+                new_stats.write_error_count = 1;
         } else {
             new_stats.read_count = 1;
             new_stats.read_bytes = io->data_len;
             new_stats.read_latency_ns = latency_ns;
             update_disk_histogram(new_stats.read_histogram, latency_ns);
+            if (error != 0)
+                new_stats.read_error_count = 1;
         }
         bpf_map_update_elem(&disk_io_stats, &dev_id, &new_stats, BPF_NOEXIST);
     }
@@ -205,12 +216,18 @@ int io_start(struct pt_regs *ctx)
 
 // blk_mq_end_request -- called when a block I/O request completes.
 // We look up the matching start record, compute latency, and update stats.
+// Signature: void blk_mq_end_request(struct request *rq, blk_status_t error)
+// blk_status_t is an unsigned char (u8): 0 = BLK_STS_OK (success), non-zero = error.
 SEC("kprobe/blk_mq_end_request")
 int io_done(struct pt_regs *ctx)
 {
     struct request *rq = (struct request *)PT_REGS_PARM1(ctx);
     if (!rq)
         return 0;
+
+    // Capture the error status (second parameter)
+    // blk_status_t is u8, but passed as unsigned long in registers
+    __u8 error = (__u8)PT_REGS_PARM2(ctx);
 
     __u64 rq_key = (__u64)rq;
     struct inflight_io *io =
@@ -221,7 +238,7 @@ int io_done(struct pt_regs *ctx)
     __u64 end_time = bpf_ktime_get_ns();
     __u64 latency_ns = end_time - io->start_time_ns;
 
-    record_io(io, latency_ns);
+    record_io(io, latency_ns, error);
 
     bpf_map_delete_elem(&active_disk_requests, &rq_key);
     return 0;
