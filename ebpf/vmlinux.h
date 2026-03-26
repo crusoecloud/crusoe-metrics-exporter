@@ -39,8 +39,10 @@ typedef _Bool bool;
 #define AF_INET 2
 
 
-// pt_regs: Architecture-specific register state for x86_64
-// Required by BPF_KPROBE and BPF_KRETPROBE macros
+// pt_regs: Architecture-specific register state
+// Required by BPF_KPROBE and BPF_KRETPROBE macros via bpf_tracing.h
+#if defined(__TARGET_ARCH_x86)
+
 struct pt_regs {
     unsigned long r15;
     unsigned long r14;
@@ -65,8 +67,22 @@ struct pt_regs {
     unsigned long ss;
 };
 
-// Socket family
-#define AF_INET 2
+#elif defined(__TARGET_ARCH_arm64)
+
+struct user_pt_regs {
+    __u64 regs[31];
+    __u64 sp;
+    __u64 pc;
+    __u64 pstate;
+};
+
+struct pt_regs {
+    struct user_pt_regs user_regs;
+};
+
+#else
+#error "Unsupported target architecture: define __TARGET_ARCH_x86 or __TARGET_ARCH_arm64"
+#endif
 
 // sock_common: Common socket structure fields
 struct sock_common {
