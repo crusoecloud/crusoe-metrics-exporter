@@ -122,12 +122,14 @@ static __always_inline __u32 get_device_id(struct request *rq)
         return (major << 8) | (minor & 0xFF);
     }
 
-    // Fallback for pre-5.18: rq->rq_disk
-    struct gendisk *disk = BPF_CORE_READ(rq, rq_disk);
-    if (disk) {
-        int major = BPF_CORE_READ(disk, major);
-        int first_minor = BPF_CORE_READ(disk, first_minor);
-        return ((__u32)major << 8) | ((__u32)first_minor & 0xFF);
+    // Fallback for pre-5.18: rq->rq_disk (only if field exists)
+    if (bpf_core_field_exists(rq->rq_disk)) {
+        struct gendisk *disk = BPF_CORE_READ(rq, rq_disk);
+        if (disk) {
+            int major = BPF_CORE_READ(disk, major);
+            int first_minor = BPF_CORE_READ(disk, first_minor);
+            return ((__u32)major << 8) | ((__u32)first_minor & 0xFF);
+        }
     }
 
     return 0;
