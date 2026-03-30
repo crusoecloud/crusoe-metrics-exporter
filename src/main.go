@@ -14,6 +14,8 @@ import (
 )
 
 func main() {
+	registry := prometheus.NewRegistry()
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "9500"
@@ -37,7 +39,7 @@ func main() {
 	if err != nil {
 		log.Errorf("Failed to create disk latency collector: %v (continuing without disk metrics)", err)
 	} else {
-		prometheus.MustRegister(diskLatencyCollector)
+		registry.MustRegister(diskLatencyCollector)
 		defer diskLatencyCollector.Close()
 		log.Infof("eBPF disk latency collector enabled")
 	}
@@ -104,7 +106,7 @@ func main() {
 	if err != nil {
 		log.Errorf("Failed to create NFS latency collector: %v (continuing without NFS metrics)", err)
 	} else {
-		prometheus.MustRegister(nfsCollector)
+		registry.MustRegister(nfsCollector)
 		defer nfsCollector.Close()
 		log.Infof("NFS latency collector enabled - protocols: %v, ports: %v, volume_id: %v",
 			protocols, targetPorts, enableVolumeID)
@@ -116,7 +118,7 @@ func main() {
 		mountStatsPath = hostProcPath + "/1/mountstats"
 	}
 	nfsStatsCollector := collectors.NewNFSStatsCollector(mountStatsPath)
-	prometheus.MustRegister(nfsStatsCollector)
+	registry.MustRegister(nfsStatsCollector)
 	log.Infof("NFS stats collector enabled (mountstats: %s)", mountStatsPath)
 
 	// Object store latency collector (eBPF-based)
@@ -144,13 +146,13 @@ func main() {
 		if err != nil {
 			log.Errorf("Failed to create object store latency collector: %v (continuing without object store metrics)", err)
 		} else {
-			prometheus.MustRegister(objStoreCollector)
+			registry.MustRegister(objStoreCollector)
 			defer objStoreCollector.Close()
 			log.Infof("Object store latency collector enabled for IPs: %v, port: %d", objStoreIPs, objStorePort)
 		}
 	}
 
-	http.Handle("/metrics", promhttp.Handler())
+	http.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
