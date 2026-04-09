@@ -318,7 +318,17 @@ int tcp_retransmit_entry(struct pt_regs *ctx)
     if (family != AF_INET)
         return 0;
 
-    __u32 dest_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    __u32 dest_ip  = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    __u16 dest_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
+
+    // Check target port from config (must match NFS port, typically 2049)
+    __u32 cfg_key = 0;
+    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (cfg) {
+        __u16 target_port_net = bpf_htons(cfg->target_port);
+        if (dest_port != target_port_net)
+            return 0;
+    }
 
     if (!is_nfs_server(dest_ip))
         return 0;
