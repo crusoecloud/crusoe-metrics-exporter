@@ -2,8 +2,8 @@ package collectors
 
 import (
 	"bufio"
-	"encoding/binary"
 	_ "embed"
+	"encoding/binary"
 	"fmt"
 	"metrics-exporter/src/log"
 	"net"
@@ -20,6 +20,7 @@ import (
 
 // Use the working TCP eBPF program for NFS monitoring
 // NFS traffic runs over TCP, so we can reuse the TCP latency eBPF program
+//
 //go:embed ebpf/nfs_latency.o
 var nfsLatencyBPF []byte
 
@@ -35,19 +36,19 @@ type NFSConfig struct {
 
 // NFSLatencyCollector monitors NFS request latency using eBPF kprobes
 type NFSLatencyCollector struct {
-	objs            *ebpf.Collection
-	tcpSendLink     link.Link
-	tcpRecvLink     link.Link
-	retransmitLink  link.Link
-	udpSendLink     link.Link
-	latencyDesc      *prometheus.Desc
-	requestsDesc     *prometheus.Desc
-	retransmitDesc   *prometheus.Desc
-	latencyHistDesc  *prometheus.Desc
-	volumeMapping *VolumeMapping
-	config        NFSConfig
+	objs              *ebpf.Collection
+	tcpSendLink       link.Link
+	tcpRecvLink       link.Link
+	retransmitLink    link.Link
+	udpSendLink       link.Link
+	latencyDesc       *prometheus.Desc
+	requestsDesc      *prometheus.Desc
+	retransmitDesc    *prometheus.Desc
+	latencyHistDesc   *prometheus.Desc
+	volumeMapping     *VolumeMapping
+	config            NFSConfig
 	lastMappingUpdate time.Time
-	mappingMutex sync.RWMutex
+	mappingMutex      sync.RWMutex
 }
 
 // NewNFSLatencyCollector creates a new NFS latency collector
@@ -92,7 +93,7 @@ func NewNFSLatencyCollector(config NFSConfig) (*NFSLatencyCollector, error) {
 			nil,
 		),
 		volumeMapping: NewVolumeMapping(),
-		config:       config,
+		config:        config,
 	}
 
 	// Allow the current process to lock memory for eBPF resources
@@ -277,7 +278,7 @@ func (c *NFSLatencyCollector) attachUDPProbes() error {
 // resolveDomainName resolves a domain name to all its IP addresses
 func (c *NFSLatencyCollector) resolveDomainName(domainName string) []string {
 	var ips []string
-	
+
 	// Try to resolve the domain name
 	addrs, err := net.LookupHost(domainName)
 	if err == nil {
@@ -288,7 +289,7 @@ func (c *NFSLatencyCollector) resolveDomainName(domainName string) []string {
 			}
 		}
 	}
-	
+
 	// If DNS resolution failed or returned no IPs, return empty slice
 	return ips
 }
@@ -296,10 +297,10 @@ func (c *NFSLatencyCollector) resolveDomainName(domainName string) []string {
 // extractIPsFromMountOptions extracts all IPs from mount options
 func (c *NFSLatencyCollector) extractIPsFromMountOptions(fields []string) []string {
 	var ips []string
-	
+
 	// Join all fields from index 5 onwards (options)
 	optionsString := strings.Join(fields[5:], " ")
-	
+
 	// Find all addr= occurrences (not mountaddr=)
 	searchStart := 0
 	for {
@@ -314,10 +315,10 @@ func (c *NFSLatencyCollector) extractIPsFromMountOptions(fields []string) []stri
 				break
 			}
 		}
-		
+
 		// Adjust for search start position
 		addrIndex += searchStart
-		
+
 		// Extract the IP starting from addr=
 		addrStart := addrIndex + 5 // len("addr=")
 		// Skip comma if present
@@ -340,15 +341,17 @@ func (c *NFSLatencyCollector) extractIPsFromMountOptions(fields []string) []stri
 				ips = append(ips, ip)
 			}
 		}
-		
+
 		// Continue searching from after this IP
 		searchStart = addrEnd
 	}
-	
+
 	return ips
 }
 
-// updateVolumeMapping updates the volume mapping from mount information
+// updateVolumeMapping updates the volume mapping from mount information and
+// refreshes the eBPF nfs_server_ips map with ALL discovered NFS server IPs
+// (not just those with volume ID mappings).
 func (c *NFSLatencyCollector) updateVolumeMapping() error {
 	file, err := os.Open(c.config.HostMountsPath)
 	if err != nil {
@@ -356,7 +359,11 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 	}
 	defer file.Close()
 
+	// mapping: IP → volume ID (only for mounts with :/volumes/ path)
 	mapping := make(map[string]string)
+	// allNFSIPs: every NFS server IP discovered, regardless of volume mapping
+	allNFSIPs := make(map[string]bool)
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -364,12 +371,33 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 			continue
 		}
 
-		// Format: server:/volumes/{uuid} /mount/point nfs ...
 		serverPath := fields[0]
 		fsType := fields[2]
 
-		if fsType != "nfs" {
+		if fsType != "nfs" && fsType != "nfs4" {
 			continue
+		}
+
+		// Discover IPs from this NFS mount (addr= option or server part)
+		var mountIPs []string
+		if len(fields) >= 6 {
+			mountIPs = c.extractIPsFromMountOptions(fields)
+		}
+		if len(mountIPs) == 0 {
+			colonIdx := strings.Index(serverPath, ":")
+			if colonIdx > 0 {
+				serverPart := serverPath[:colonIdx]
+				if net.ParseIP(serverPart) != nil {
+					mountIPs = []string{serverPart}
+				} else {
+					mountIPs = c.resolveDomainName(serverPart)
+				}
+			}
+		}
+
+		// Add all discovered IPs to the full set
+		for _, ip := range mountIPs {
+			allNFSIPs[ip] = true
 		}
 
 		// Extract volume ID from server:/volumes/{uuid}
@@ -377,36 +405,7 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 			parts := strings.Split(serverPath, ":/volumes/")
 			if len(parts) == 2 {
 				volumeID := parts[1]
-				serverName := parts[0]
-				
-				// Extract IPs from mount options (addr=X.X.X.X)
-				ips := c.extractIPsFromMountOptions(fields)
-				
-				// If no IPs found in options, check if serverName is already an IP address
-				if len(ips) == 0 {
-					// Extract the server part (before :/volumes/)
-					serverPart := serverName
-					if strings.Contains(serverName, ":") {
-						serverPart = strings.Split(serverName, ":")[0]
-					}
-					
-					// Check if serverPart is already an IP address
-					if net.ParseIP(serverPart) != nil {
-						// It's already an IP address, use it directly
-						ips = []string{serverPart}
-					} else {
-						// It's a domain name, try DNS resolution
-						ips = c.resolveDomainName(serverPart)
-					}
-				}
-				
-				// If still no IPs found, fallback to server name
-				if len(ips) == 0 {
-					ips = []string{serverName}
-				}
-				
-				// Create mapping for each IP to this volume
-				for _, ip := range ips {
+				for _, ip := range mountIPs {
 					mapping[ip] = volumeID
 				}
 			}
@@ -417,15 +416,38 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 		return fmt.Errorf("error reading /proc/mounts: %w", err)
 	}
 
+	// Also include explicitly configured server IPs
+	for _, ip := range c.config.ServerIPs {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			continue
+		}
+		if parsedIP := net.ParseIP(ip); parsedIP != nil {
+			allNFSIPs[ip] = true
+		} else {
+			for _, rip := range c.resolveDomainName(ip) {
+				allNFSIPs[rip] = true
+			}
+		}
+	}
+
 	c.volumeMapping.UpdateMapping(mapping)
 	c.lastMappingUpdate = time.Now()
-	log.Infof("Updated NFS volume mapping with %d entries from %d unique IPs", len(mapping), len(mapping))
-	
-	// Update eBPF NFS server IPs map with real NFS server IPs
-	if err := c.updateNFSServerIPsMap(mapping); err != nil {
+	log.Infof("Updated NFS volume mapping: %d volume entries, %d total server IPs", len(mapping), len(allNFSIPs))
+
+	// Update eBPF map with ALL NFS server IPs (not just volume-mapped ones)
+	allIPMapping := make(map[string]string)
+	for ip := range allNFSIPs {
+		if vol, ok := mapping[ip]; ok {
+			allIPMapping[ip] = vol
+		} else {
+			allIPMapping[ip] = ""
+		}
+	}
+	if err := c.updateNFSServerIPsMap(allIPMapping); err != nil {
 		log.Warnf("failed to update NFS server IPs map: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -535,9 +557,10 @@ func (c *NFSLatencyCollector) populateNFSServerIPs() error {
 	return nil
 }
 
-// updateNFSServerIPsMap updates the eBPF NFS server IPs map with real NFS server IPs
+// updateNFSServerIPsMap updates the eBPF NFS server IPs map with real NFS server IPs.
+// It writes the new IPs and then zeros out any remaining slots so the eBPF probe's
+// is_nfs_server() loop terminates correctly when the set shrinks.
 func (c *NFSLatencyCollector) updateNFSServerIPsMap(mapping map[string]string) error {
-	// Get the NFS server IPs map from the eBPF program
 	serverIPsMap := c.objs.Maps["nfs_server_ips"]
 	if serverIPsMap == nil {
 		return fmt.Errorf("nfs_server_ips map not found in eBPF collection")
@@ -552,33 +575,61 @@ func (c *NFSLatencyCollector) updateNFSServerIPsMap(mapping map[string]string) e
 	// Populate the eBPF map with NFS server IPs
 	index := uint32(0)
 	for ip := range uniqueIPs {
-		// Convert IP string to uint32
 		parsedIP := net.ParseIP(ip)
 		if parsedIP == nil {
 			log.Warnf("invalid IP address %s, skipping", ip)
 			continue
 		}
-
-		// Convert to IPv4 uint32 (network byte order)
 		ipv4 := parsedIP.To4()
 		if ipv4 == nil {
 			log.Warnf("non-IPv4 address %s, skipping", ip)
 			continue
 		}
-
 		ipUint32 := binary.LittleEndian.Uint32(ipv4)
-
-		// Update eBPF map
 		if err := serverIPsMap.Update(&index, &ipUint32, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("failed to update nfs_server_ips map at index %d with IP %s: %w", index, ip, err)
 		}
-
 		log.Infof("Added NFS server IP %s to eBPF map at index %d", ip, index)
 		index++
+		if index >= 64 {
+			log.Warnf("nfs_server_ips map full at 64 entries, remaining IPs skipped")
+			break
+		}
 	}
 
-	log.Infof("Updated eBPF NFS server IPs map with %d real NFS server IPs", index)
+	// Zero out remaining slots so the eBPF is_nfs_server() loop stops
+	var zero uint32
+	for i := index; i < 64; i++ {
+		_ = serverIPsMap.Update(&i, &zero, ebpf.UpdateAny)
+	}
+
+	log.Infof("Updated eBPF NFS server IPs map with %d IPs (cleared %d stale slots)", index, 64-index)
 	return nil
+}
+
+// refreshMountsIfNeeded re-scans /proc/mounts for NFS server IPs and updates
+// both the volume mapping and the eBPF nfs_server_ips map.  This is called at
+// the start of every Collect so that mounts added after startup are detected.
+func (c *NFSLatencyCollector) refreshMountsIfNeeded() {
+	c.mappingMutex.RLock()
+	needsRefresh := time.Since(c.lastMappingUpdate) > c.config.MountRefreshInterval
+	c.mappingMutex.RUnlock()
+
+	if !needsRefresh {
+		return
+	}
+
+	c.mappingMutex.Lock()
+	defer c.mappingMutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if time.Since(c.lastMappingUpdate) <= c.config.MountRefreshInterval {
+		return
+	}
+
+	if err := c.updateVolumeMapping(); err != nil {
+		log.Warnf("failed to refresh NFS mounts: %v", err)
+	}
 }
 
 // getVolumeID returns the volume ID for a given IP and export path hash
@@ -587,36 +638,20 @@ func (c *NFSLatencyCollector) getVolumeID(ip string, exportPathHash uint64) stri
 		return ""
 	}
 
-	// Check if mapping needs refresh
-	c.mappingMutex.RLock()
-	needsRefresh := time.Since(c.lastMappingUpdate) > c.config.MountRefreshInterval
-	c.mappingMutex.RUnlock()
-
-	if needsRefresh {
-		c.mappingMutex.Lock()
-		if time.Since(c.lastMappingUpdate) > c.config.MountRefreshInterval {
-			if err := c.updateVolumeMapping(); err != nil {
-				log.Warnf("failed to refresh volume mapping: %v", err)
-			}
-		}
-		c.mappingMutex.Unlock()
-	}
-
 	// Try to resolve volume ID using export path hash first
 	volumeID := c.volumeMapping.GetVolumeIDByHash(ip, exportPathHash)
 	if volumeID == "" {
 		// Fallback to IP-based mapping for backward compatibility
 		volumeID = c.volumeMapping.GetVolumeID(ip)
 	}
-	
+
 	if volumeID == "" {
 		// If no mapping found, use hash-based identifier
 		volumeID = fmt.Sprintf("unknown-%x", exportPathHash)
 	}
-	
+
 	return volumeID
 }
-
 
 // Describe implements prometheus.Collector
 func (c *NFSLatencyCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -636,6 +671,10 @@ type nfsVolumeAgg struct {
 
 // Collect implements prometheus.Collector
 func (c *NFSLatencyCollector) Collect(ch chan<- prometheus.Metric) {
+	// Periodically re-scan /proc/mounts for new NFS mounts and update the
+	// eBPF server IPs map.  This ensures mounts added after startup are detected.
+	c.refreshMountsIfNeeded()
+
 	// Get the nfs_latency_by_ip map from the NFS eBPF program
 	latencyMap := c.objs.Maps["nfs_latency_by_ip"]
 	if latencyMap == nil {
