@@ -18,7 +18,7 @@ type ProbeConfig struct {
 	ObjStoreFQDN   string        // FQDN of the object store endpoint
 	HostMountsPath string        // Path to host mounts file for NFS IP discovery
 	ProbeInterval  time.Duration // How often to run probes (default 5m)
-	MaxJitter      time.Duration // Maximum random jitter before probing (default 60s)
+	MaxJitter      time.Duration // Maximum random jitter before probing (0 = no jitter)
 	ProbeTimeout   time.Duration // Timeout for individual probes (default 10s)
 }
 
@@ -46,9 +46,8 @@ func NewProbeCollector(config ProbeConfig) *ProbeCollector {
 	if config.ProbeInterval == 0 {
 		config.ProbeInterval = 5 * time.Minute
 	}
-	if config.MaxJitter == 0 {
-		config.MaxJitter = 60 * time.Second
-	}
+	// MaxJitter is not defaulted here — 0 means no jitter.
+	// Callers should set it explicitly (e.g. 30s for production).
 	if config.ProbeTimeout == 0 {
 		config.ProbeTimeout = 10 * time.Second
 	}

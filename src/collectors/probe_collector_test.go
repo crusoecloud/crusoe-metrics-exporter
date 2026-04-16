@@ -178,8 +178,8 @@ func TestProbeConfigDefaults(t *testing.T) {
 	if p.config.ProbeInterval != 5*time.Minute {
 		t.Errorf("default ProbeInterval: got %v, want 5m", p.config.ProbeInterval)
 	}
-	if p.config.MaxJitter != 60*time.Second {
-		t.Errorf("default MaxJitter: got %v, want 60s", p.config.MaxJitter)
+	if p.config.MaxJitter != 0 {
+		t.Errorf("default MaxJitter: got %v, want 0 (no jitter unless explicitly set)", p.config.MaxJitter)
 	}
 	if p.config.ProbeTimeout != 10*time.Second {
 		t.Errorf("default ProbeTimeout: got %v, want 10s", p.config.ProbeTimeout)

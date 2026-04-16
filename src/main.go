@@ -175,6 +175,7 @@ func main() {
 	probeConfig := collectors.ProbeConfig{
 		ObjStoreFQDN:   objStoreFQDN,
 		HostMountsPath: hostMountsPath,
+		MaxJitter:      30 * time.Second,
 	}
 	probeCollector := collectors.NewProbeCollector(probeConfig)
 	registry.MustRegister(probeCollector)
