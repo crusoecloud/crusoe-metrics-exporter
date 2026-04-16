@@ -26,8 +26,8 @@ func TestProbeCollectorDescribe(t *testing.T) {
 		count++
 	}
 
-	if count != 3 {
-		t.Errorf("expected 3 descriptors, got %d", count)
+	if count != 4 {
+		t.Errorf("expected 4 descriptors, got %d", count)
 	}
 }
 
@@ -49,6 +49,9 @@ func TestProbeCollectorCollectEmitsResults(t *testing.T) {
 	p.rpcResults = []probeResult{
 		{IP: "10.0.0.1", Success: true, Latency: 15 * time.Millisecond},
 	}
+	p.objStorePingResults = []probeResult{
+		{IP: "10.0.0.3", Success: true, Latency: 8 * time.Millisecond},
+	}
 	p.httpsResults = []probeResult{
 		{IP: "10.0.0.3", Success: true, Latency: 100 * time.Millisecond},
 	}
@@ -63,9 +66,9 @@ func TestProbeCollectorCollectEmitsResults(t *testing.T) {
 		count++
 	}
 
-	// 2 ping + 1 rpc + 1 https = 4 metrics
-	if count != 4 {
-		t.Errorf("expected 4 metrics, got %d", count)
+	// 2 nfs ping + 1 rpc + 1 objstore ping + 1 https = 5 metrics
+	if count != 5 {
+		t.Errorf("expected 5 metrics, got %d", count)
 	}
 }
 

@@ -26,14 +26,16 @@ type ProbeConfig struct {
 type ProbeCollector struct {
 	config ProbeConfig
 
-	nfsPingDesc      *prometheus.Desc
-	nfsRPCDesc       *prometheus.Desc
-	objStoreHTTPDesc *prometheus.Desc
+	nfsPingDesc       *prometheus.Desc
+	nfsRPCDesc        *prometheus.Desc
+	objStorePingDesc  *prometheus.Desc
+	objStoreHTTPDesc  *prometheus.Desc
 
-	mu           sync.RWMutex
-	pingResults  []probeResult
-	rpcResults   []probeResult
-	httpsResults []probeResult
+	mu                sync.RWMutex
+	pingResults       []probeResult
+	rpcResults        []probeResult
+	objStorePingResults []probeResult
+	httpsResults      []probeResult
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -65,6 +67,12 @@ func NewProbeCollector(config ProbeConfig) *ProbeCollector {
 			[]string{"endpoint"},
 			nil,
 		),
+		objStorePingDesc: prometheus.NewDesc(
+			MetricPrefix+"objectstore_ping_latency_seconds",
+			"ICMP ping RTT to object store server in seconds (0 if probe failed)",
+			[]string{"endpoint"},
+			nil,
+		),
 		objStoreHTTPDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_https_probe_latency_seconds",
 			"HTTPS probe latency to object store in seconds (0 if probe failed)",
@@ -84,6 +92,7 @@ func NewProbeCollector(config ProbeConfig) *ProbeCollector {
 func (p *ProbeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- p.nfsPingDesc
 	ch <- p.nfsRPCDesc
+	ch <- p.objStorePingDesc
 	ch <- p.objStoreHTTPDesc
 }
 
@@ -106,6 +115,14 @@ func (p *ProbeCollector) Collect(ch chan<- prometheus.Metric) {
 			val = r.Latency.Seconds()
 		}
 		ch <- prometheus.MustNewConstMetric(p.nfsRPCDesc, prometheus.GaugeValue, val, r.IP)
+	}
+
+	for _, r := range p.objStorePingResults {
+		val := 0.0
+		if r.Success {
+			val = r.Latency.Seconds()
+		}
+		ch <- prometheus.MustNewConstMetric(p.objStorePingDesc, prometheus.GaugeValue, val, r.IP)
 	}
 
 	for _, r := range p.httpsResults {
@@ -194,6 +211,16 @@ func (p *ProbeCollector) runProbes() {
 		}(i, ip)
 	}
 
+	// ICMP ping probes for ObjStore IPs
+	objStorePingResults := make([]probeResult, len(objStoreIPs))
+	for i, ip := range objStoreIPs {
+		wg.Add(1)
+		go func(idx int, target string) {
+			defer wg.Done()
+			objStorePingResults[idx] = p.probeICMPPing(target)
+		}(i, ip)
+	}
+
 	// HTTPS probes for ObjStore IPs
 	httpsResults := make([]probeResult, len(objStoreIPs))
 	for i, ip := range objStoreIPs {
@@ -221,6 +248,13 @@ func (p *ProbeCollector) runProbes() {
 			log.Debugf("NFS RPC %s: failed", r.IP)
 		}
 	}
+	for _, r := range objStorePingResults {
+		if r.Success {
+			log.Debugf("ObjStore ICMP ping %s: %.3fms", r.IP, float64(r.Latency.Microseconds())/1000.0)
+		} else {
+			log.Debugf("ObjStore ICMP ping %s: failed", r.IP)
+		}
+	}
 	for _, r := range httpsResults {
 		if r.Success {
 			log.Debugf("HTTPS %s: %.3fms", r.IP, float64(r.Latency.Microseconds())/1000.0)
@@ -233,6 +267,7 @@ func (p *ProbeCollector) runProbes() {
 	p.mu.Lock()
 	p.pingResults = pingResults
 	p.rpcResults = rpcResults
+	p.objStorePingResults = objStorePingResults
 	p.httpsResults = httpsResults
 	p.mu.Unlock()
 }
