@@ -311,13 +311,30 @@ func (p *ProbeCollector) discoverNFSIPs() []string {
 			}
 		}
 
-		// Fallback: extract from server:/path
+		// Also extract server from device field (server:/path)
 		serverPath := fields[0]
 		colonIdx := strings.Index(serverPath, ":")
 		if colonIdx > 0 {
 			serverPart := serverPath[:colonIdx]
-			if net.ParseIP(serverPart) != nil && !seen[serverPart] {
-				seen[serverPart] = true
+			if net.ParseIP(serverPart) != nil {
+				if !seen[serverPart] {
+					seen[serverPart] = true
+				}
+			} else {
+				// Hostname — resolve via DNS to get all A records
+				resolved, err := net.LookupIP(serverPart)
+				if err != nil {
+					log.Debugf("DNS resolution failed for NFS server %s: %v", serverPart, err)
+				} else {
+					for _, ip := range resolved {
+						if v4 := ip.To4(); v4 != nil {
+							s := v4.String()
+							if !seen[s] {
+								seen[s] = true
+							}
+						}
+					}
+				}
 			}
 		}
 	}
