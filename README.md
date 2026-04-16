@@ -43,7 +43,8 @@ See [BUILD_TEST.md](BUILD_TEST.md) for details on how to build/test eBPF locally
 | `NFS_TARGET_PORTS` | `2049` | Comma-separated NFS target ports |
 | `NFS_ENABLE_VOLUME_ID` | `true` | Enable volume ID extraction from mount paths |
 | `NFS_MOUNT_REFRESH_INTERVAL` | `30s` | How often to re-scan mounts for new NFS volumes |
-| `OBJSTORE_ENDPOINT_IPS` | - | Comma-separated object store endpoint IPs (required to enable collector) |
+| `OBJSTORE_ENDPOINT_FQDN` | - | Object store endpoint FQDN, resolved via DNS to up to 16 IPs (preferred; required to enable collector unless `OBJSTORE_ENDPOINT_IPS` is set) |
+| `OBJSTORE_ENDPOINT_IPS` | - | Comma-separated object store endpoint IPs (legacy fallback; ignored when `OBJSTORE_ENDPOINT_FQDN` is set) |
 | `OBJSTORE_ENDPOINT_PORT` | `443` | Port to monitor for object store traffic |
 | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`, `fatal`) |
 
@@ -126,7 +127,7 @@ Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. 
 
 **Source:** `src/collectors/objstore-latency-collector.go` | **eBPF:** `ebpf/objstore_latency.c`
 
-Measures object store (S3-compatible) request latency using eBPF kprobes on `tcp_sendmsg` / `tcp_cleanup_rbuf`, filtered to configured endpoint IPs. Also tracks TCP retransmissions via `tcp_retransmit_skb`. Enabled only when `OBJSTORE_ENDPOINT_IPS` is set.
+Measures object store (S3-compatible) request latency using eBPF kprobes on `tcp_sendmsg` / `tcp_cleanup_rbuf`, filtered to configured endpoint IPs. Also tracks TCP retransmissions via `tcp_retransmit_skb`. Enabled when `OBJSTORE_ENDPOINT_FQDN` or `OBJSTORE_ENDPOINT_IPS` is set. The preferred configuration is `OBJSTORE_ENDPOINT_FQDN` (e.g. `object.eu-iceland1-a.crusoecloudcompute.com`), which is resolved via DNS at startup.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

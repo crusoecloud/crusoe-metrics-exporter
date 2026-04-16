@@ -99,10 +99,11 @@ Measures HTTP request latency to object store endpoints by probing `tcp_sendmsg`
 
 ### Environment Variables
 
-| Variable                | Default | Description |
-|-------------------------|---------|-------------|
-| `OBJSTORE_ENDPOINT_IPS` | (none)  | Comma-separated object store server IPs. **Required** -- the collector is skipped if this is empty. |
-| `OBJSTORE_ENDPOINT_PORT`| `443`   | Destination port to filter on |
+| Variable                 | Default | Description |
+|--------------------------|---------|-------------|
+| `OBJSTORE_ENDPOINT_FQDN` | (none)  | Object store endpoint FQDN (e.g. `object.eu-iceland1-a.crusoecloudcompute.com`). Resolved via DNS at startup to up to 16 IPv4 addresses. **Preferred** -- takes precedence over `OBJSTORE_ENDPOINT_IPS`. |
+| `OBJSTORE_ENDPOINT_IPS`  | (none)  | Comma-separated object store server IPs. Legacy fallback -- ignored when `OBJSTORE_ENDPOINT_FQDN` is set. The collector is skipped if neither variable yields IPs. |
+| `OBJSTORE_ENDPOINT_PORT` | `443`   | Destination port to filter on |
 
 ### Metrics
 
@@ -120,10 +121,15 @@ All metrics are labeled by `endpoint` and `operation`.
 
 ```yaml
 env:
-- name: OBJSTORE_ENDPOINT_IPS
-  value: "100.63.0.10,10.234.1.180,10.234.1.132"
+# Preferred: use FQDN (resolved via DNS at startup)
+- name: OBJSTORE_ENDPOINT_FQDN
+  value: "object.eu-iceland1-a.crusoecloudcompute.com"
 - name: OBJSTORE_ENDPOINT_PORT
-  value: "8080"
+  value: "443"
+
+# Legacy fallback: explicit IPs (ignored when OBJSTORE_ENDPOINT_FQDN is set)
+# - name: OBJSTORE_ENDPOINT_IPS
+#   value: "100.63.0.10,10.234.1.180,10.234.1.132"
 ```
 
 ---
@@ -136,10 +142,10 @@ Minimal daemonset env block with all three collectors:
 env:
 - name: HOST_PROC_PATH
   value: /host/proc
+- name: OBJSTORE_ENDPOINT_FQDN
+  value: "object.eu-iceland1-a.crusoecloudcompute.com"
 - name: OBJSTORE_ENDPOINT_PORT
-  value: "8080"
-- name: OBJSTORE_ENDPOINT_IPS
-  value: "100.63.0.10,10.234.1.180,10.234.1.132"
+  value: "443"
 ```
 
 The container requires:

@@ -7,6 +7,7 @@ package collectors
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -78,23 +79,55 @@ func parseNFSConfigFromEnv() NFSConfig {
 }
 
 // parseObjStoreConfigFromEnv mirrors the objstore config parsing in main.go
-func parseObjStoreConfigFromEnv() (ips []string, targetPort uint16) {
-	targetPort = 443
+func parseObjStoreConfigFromEnv() ObjStoreConfig {
+	config := ObjStoreConfig{
+		TargetPort: 443,
+	}
+
 	if portStr := os.Getenv("OBJSTORE_ENDPOINT_PORT"); portStr != "" {
 		if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-			targetPort = uint16(port)
+			config.TargetPort = uint16(port)
 		}
 	}
 
-	if ipsStr := os.Getenv("OBJSTORE_ENDPOINT_IPS"); ipsStr != "" {
+	if fqdn := os.Getenv("OBJSTORE_ENDPOINT_FQDN"); fqdn != "" {
+		fqdn = strings.TrimSpace(fqdn)
+		config.FQDN = fqdn
+		resolved, err := resolveObjStoreFQDN(fqdn)
+		if err == nil {
+			config.InitialIPs = resolved
+		}
+	} else if ipsStr := os.Getenv("OBJSTORE_ENDPOINT_IPS"); ipsStr != "" {
 		for _, ip := range strings.Split(ipsStr, ",") {
 			ip = strings.TrimSpace(ip)
 			if ip != "" {
-				ips = append(ips, ip)
+				config.InitialIPs = append(config.InitialIPs, ip)
 			}
 		}
 	}
-	return
+	return config
+}
+
+// resolveObjStoreFQDN resolves an FQDN to its IPv4 addresses via DNS.
+// This is a copy of the function in main.go for test isolation.
+func resolveObjStoreFQDN(fqdn string) ([]string, error) {
+	ips, err := net.LookupIP(fqdn)
+	if err != nil {
+		return nil, fmt.Errorf("DNS lookup failed for %s: %w", fqdn, err)
+	}
+
+	var ipv4s []string
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			ipv4s = append(ipv4s, v4.String())
+		}
+	}
+
+	if len(ipv4s) == 0 {
+		return nil, fmt.Errorf("no IPv4 addresses found for %s", fqdn)
+	}
+
+	return ipv4s, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +296,7 @@ func TestObjStoreEnvVarParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			savedEnv := map[string]string{}
-			allKeys := []string{"OBJSTORE_ENDPOINT_IPS", "OBJSTORE_ENDPOINT_PORT"}
+			allKeys := []string{"OBJSTORE_ENDPOINT_IPS", "OBJSTORE_ENDPOINT_PORT", "OBJSTORE_ENDPOINT_FQDN"}
 			for _, k := range allKeys {
 				savedEnv[k] = os.Getenv(k)
 				os.Unsetenv(k)
@@ -282,20 +315,20 @@ func TestObjStoreEnvVarParsing(t *testing.T) {
 				os.Setenv(k, v)
 			}
 
-			ips, port := parseObjStoreConfigFromEnv()
+			config := parseObjStoreConfigFromEnv()
 
-			if len(ips) != len(tt.expectIPs) {
-				t.Errorf("IPs: got %v, want %v", ips, tt.expectIPs)
+			if len(config.InitialIPs) != len(tt.expectIPs) {
+				t.Errorf("IPs: got %v, want %v", config.InitialIPs, tt.expectIPs)
 			} else {
 				for i, ip := range tt.expectIPs {
-					if ips[i] != ip {
-						t.Errorf("IPs[%d]: got %q, want %q", i, ips[i], ip)
+					if config.InitialIPs[i] != ip {
+						t.Errorf("IPs[%d]: got %q, want %q", i, config.InitialIPs[i], ip)
 					}
 				}
 			}
 
-			if port != tt.expectPort {
-				t.Errorf("Port: got %d, want %d", port, tt.expectPort)
+			if config.TargetPort != tt.expectPort {
+				t.Errorf("Port: got %d, want %d", config.TargetPort, tt.expectPort)
 			}
 		})
 	}
@@ -523,7 +556,7 @@ func TestObjStoreIPsPropagatedToEBPFMap(t *testing.T) {
 	// Verifies: env OBJSTORE_ENDPOINT_IPS -> filterIPs -> objstore_server_ips eBPF map
 	testIPs := []string{"100.63.0.10", "100.63.0.11"}
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, 8080)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPort: 8080})
 	if err != nil {
 		t.Skipf("Skipping eBPF integration test (expected on non-Linux): %v", err)
 		return
@@ -572,7 +605,7 @@ func TestObjStoreIPsPropagatedToEBPFMap(t *testing.T) {
 
 func TestObjStorePortPropagatedToEBPFMap(t *testing.T) {
 	// Verifies: env OBJSTORE_ENDPOINT_PORT -> targetPort -> config_map eBPF map
-	collector, err := NewObjStoreLatencyCollector([]string{"100.63.0.10"}, 8080)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: []string{"100.63.0.10"}, TargetPort: 8080})
 	if err != nil {
 		t.Skipf("Skipping eBPF integration test (expected on non-Linux): %v", err)
 		return
@@ -685,16 +718,16 @@ func TestEndToEndObjStoreEnvToEBPF(t *testing.T) {
 	os.Setenv("OBJSTORE_ENDPOINT_IPS", "100.63.0.10")
 	os.Setenv("OBJSTORE_ENDPOINT_PORT", "8080")
 
-	ips, port := parseObjStoreConfigFromEnv()
+	config := parseObjStoreConfigFromEnv()
 
-	if len(ips) != 1 || ips[0] != "100.63.0.10" {
-		t.Fatalf("parseObjStoreConfigFromEnv returned IPs %v, want [100.63.0.10]", ips)
+	if len(config.InitialIPs) != 1 || config.InitialIPs[0] != "100.63.0.10" {
+		t.Fatalf("parseObjStoreConfigFromEnv returned IPs %v, want [100.63.0.10]", config.InitialIPs)
 	}
-	if port != 8080 {
-		t.Fatalf("parseObjStoreConfigFromEnv returned port %d, want 8080", port)
+	if config.TargetPort != 8080 {
+		t.Fatalf("parseObjStoreConfigFromEnv returned port %d, want 8080", config.TargetPort)
 	}
 
-	collector, err := NewObjStoreLatencyCollector(ips, port)
+	collector, err := NewObjStoreLatencyCollector(config)
 	if err != nil {
 		t.Skipf("Skipping eBPF integration test (expected on non-Linux): %v", err)
 		return
@@ -746,5 +779,133 @@ func TestEndToEndObjStoreEnvToEBPF(t *testing.T) {
 	if val.TargetPort != 8080 {
 		t.Errorf("OBJSTORE_ENDPOINT_PORT=8080 not propagated to config_map (got %d). "+
 			"Env var is not reaching the eBPF map.", val.TargetPort)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DNS resolution tests for OBJSTORE_ENDPOINT_FQDN
+// ---------------------------------------------------------------------------
+
+func TestResolveObjStoreFQDN_ValidHostname(t *testing.T) {
+	// Resolve a well-known hostname that should always have IPv4 records.
+	ips, err := resolveObjStoreFQDN("dns.google")
+	if err != nil {
+		t.Skipf("Skipping: DNS resolution not available in this environment: %v", err)
+	}
+
+	if len(ips) == 0 {
+		t.Fatal("expected at least one IPv4 address for dns.google")
+	}
+
+	for _, ip := range ips {
+		if net.ParseIP(ip) == nil {
+			t.Errorf("resolveObjStoreFQDN returned invalid IP: %q", ip)
+		}
+		// Ensure only IPv4 addresses are returned
+		if net.ParseIP(ip).To4() == nil {
+			t.Errorf("resolveObjStoreFQDN returned non-IPv4 address: %q", ip)
+		}
+	}
+	t.Logf("dns.google resolved to %d IPs: %v", len(ips), ips)
+}
+
+func TestResolveObjStoreFQDN_NonExistentHost(t *testing.T) {
+	_, err := resolveObjStoreFQDN("this-host-does-not-exist.invalid.")
+	if err == nil {
+		t.Error("expected error for non-existent hostname, got nil")
+	}
+}
+
+func TestResolveObjStoreFQDN_ReturnsOnlyIPv4(t *testing.T) {
+	// Use localhost which should always resolve
+	ips, err := resolveObjStoreFQDN("localhost")
+	if err != nil {
+		t.Skipf("Skipping: localhost resolution not available: %v", err)
+	}
+
+	for _, ip := range ips {
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			t.Errorf("returned invalid IP: %q", ip)
+			continue
+		}
+		if parsed.To4() == nil {
+			t.Errorf("returned non-IPv4 address: %q (should filter to IPv4 only)", ip)
+		}
+	}
+}
+
+func TestObjStoreEnvVarParsing_FQDN(t *testing.T) {
+	// Save and restore env
+	savedEnv := map[string]string{}
+	allKeys := []string{"OBJSTORE_ENDPOINT_IPS", "OBJSTORE_ENDPOINT_PORT", "OBJSTORE_ENDPOINT_FQDN"}
+	for _, k := range allKeys {
+		savedEnv[k] = os.Getenv(k)
+		os.Unsetenv(k)
+	}
+	defer func() {
+		for k, v := range savedEnv {
+			if v != "" {
+				os.Setenv(k, v)
+			} else {
+				os.Unsetenv(k)
+			}
+		}
+	}()
+
+	// Set FQDN to a well-known hostname
+	os.Setenv("OBJSTORE_ENDPOINT_FQDN", "dns.google")
+	os.Setenv("OBJSTORE_ENDPOINT_PORT", "443")
+
+	config := parseObjStoreConfigFromEnv()
+
+	if len(config.InitialIPs) == 0 {
+		t.Skip("Skipping: DNS resolution not available in this environment")
+	}
+
+	if config.TargetPort != 443 {
+		t.Errorf("Port: got %d, want 443", config.TargetPort)
+	}
+
+	for _, ip := range config.InitialIPs {
+		if net.ParseIP(ip) == nil {
+			t.Errorf("FQDN resolution returned invalid IP: %q", ip)
+		}
+	}
+	t.Logf("OBJSTORE_ENDPOINT_FQDN=dns.google resolved to %d IPs: %v", len(config.InitialIPs), config.InitialIPs)
+}
+
+func TestObjStoreEnvVarParsing_FQDNTakesPrecedenceOverIPs(t *testing.T) {
+	savedEnv := map[string]string{}
+	allKeys := []string{"OBJSTORE_ENDPOINT_IPS", "OBJSTORE_ENDPOINT_PORT", "OBJSTORE_ENDPOINT_FQDN"}
+	for _, k := range allKeys {
+		savedEnv[k] = os.Getenv(k)
+		os.Unsetenv(k)
+	}
+	defer func() {
+		for k, v := range savedEnv {
+			if v != "" {
+				os.Setenv(k, v)
+			} else {
+				os.Unsetenv(k)
+			}
+		}
+	}()
+
+	// Set both FQDN and IPs -- FQDN should win
+	os.Setenv("OBJSTORE_ENDPOINT_FQDN", "dns.google")
+	os.Setenv("OBJSTORE_ENDPOINT_IPS", "1.2.3.4")
+
+	config := parseObjStoreConfigFromEnv()
+
+	if len(config.InitialIPs) == 0 {
+		t.Skip("Skipping: DNS resolution not available in this environment")
+	}
+
+	// The IPs should come from DNS resolution, not from the static list
+	for _, ip := range config.InitialIPs {
+		if ip == "1.2.3.4" {
+			t.Error("FQDN should take precedence over OBJSTORE_ENDPOINT_IPS, but got static IP 1.2.3.4")
+		}
 	}
 }

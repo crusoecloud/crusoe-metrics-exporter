@@ -47,7 +47,7 @@ func TestRealIPIntegration(t *testing.T) {
 		testIPs := []string{"100.63.0.10"}
 		targetPort := uint16(8080)
 
-		collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+		collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPort: targetPort})
 		if err != nil {
 			t.Skip("Skipping Object Store integration test - collector creation failed")
 			return

@@ -8,7 +8,7 @@ import (
 func TestEBPFProgramsLoad(t *testing.T) {
 	t.Run("ObjectStore", func(t *testing.T) {
 		// Test that objstore eBPF program can be loaded
-		collector, err := NewObjStoreLatencyCollector([]string{"172.27.255.32"}, 8080)
+		collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: []string{"172.27.255.32"}, TargetPort: 8080})
 		if err != nil {
 			t.Logf("Object store collector failed to load (expected in test environment): %v", err)
 			// This is expected in test environment without proper eBPF support

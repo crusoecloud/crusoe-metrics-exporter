@@ -236,7 +236,8 @@ Note: /host/proc/self/mounts is for in-container mounts, /host/proc/1/mounts is 
 | `NFS_PROTOCOLS`              | `tcp,udp`     | Protocols to track                                        |
 | `NFS_ENABLE_VOLUME_ID`       | `true`        | Resolve volume IDs from mount info                        |
 | `NFS_MOUNT_REFRESH_INTERVAL` | `30s`         | How often to re-scan mounts for new NFS IPs               |
-| `OBJSTORE_ENDPOINT_IPS`      | (none)        | Comma-separated object store server IPs                   |
+| `OBJSTORE_ENDPOINT_FQDN`     | (none)        | Object store endpoint FQDN (resolved via DNS; preferred)  |
+| `OBJSTORE_ENDPOINT_IPS`      | (none)        | Comma-separated object store server IPs (legacy fallback) |
 | `OBJSTORE_ENDPOINT_PORT`     | `443`         | Object store target port                                  |
 
 Note: NFS UDP hasn't been implemented. It's assumed we use NFS4 everywhere.
