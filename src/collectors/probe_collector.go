@@ -26,16 +26,16 @@ type ProbeConfig struct {
 type ProbeCollector struct {
 	config ProbeConfig
 
-	nfsPingDesc       *prometheus.Desc
-	nfsRPCDesc        *prometheus.Desc
-	objStorePingDesc  *prometheus.Desc
-	objStoreHTTPDesc  *prometheus.Desc
+	nfsPingDesc      *prometheus.Desc
+	nfsRPCDesc       *prometheus.Desc
+	objStorePingDesc *prometheus.Desc
+	objStoreHTTPDesc *prometheus.Desc
 
-	mu                sync.RWMutex
-	pingResults       []probeResult
-	rpcResults        []probeResult
+	mu                  sync.RWMutex
+	pingResults         []probeResult
+	rpcResults          []probeResult
 	objStorePingResults []probeResult
-	httpsResults      []probeResult
+	httpsResults        []probeResult
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -298,10 +298,9 @@ func (p *ProbeCollector) discoverNFSIPs() []string {
 			continue
 		}
 
-		// Extract IP from addr= mount option
-		if len(fields) >= 6 {
-			optionsString := strings.Join(fields[3:], " ")
-			for _, opt := range strings.Split(optionsString, ",") {
+		// Extract IP from addr= mount option (fields[3] is the options column)
+		if len(fields) >= 4 {
+			for _, opt := range strings.Split(fields[3], ",") {
 				opt = strings.TrimSpace(opt)
 				if strings.HasPrefix(opt, "addr=") {
 					ip := strings.TrimPrefix(opt, "addr=")
