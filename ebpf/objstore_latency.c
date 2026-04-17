@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Copyright (c) 2025 Crusoe Energy */
 //
-// Object store latency probe.  Measures the real elapsed time between an
-// outbound tcp_sendmsg and the next inbound tcp_recvmsg on the *same*
-// socket, provided the socket's destination IP is present in the
+// Object store connection-level probe.  Measures aggregate bytes,
+// retransmits, and connection-phase latency between an outbound
+// tcp_sendmsg and the next inbound tcp_recvmsg on the *same* socket,
+// provided the socket's destination IP is present in the
 // objstore_server_ips map AND the destination port matches the configured
-// target port (typically 80 or 443).
+// target port (typically 443).  Does NOT classify individual HTTP
+// requests (impossible with TLS/HTTP2); a separate proxy-based
+// measurement is used for per-request GET/PUT latency.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -26,21 +29,10 @@ struct config {
     __u16 padding;
 };
 
-// Request classification by TCP byte-ratio.
-// Works for both HTTP and HTTPS since it does not inspect payload.
-#define METHOD_OTHER   0
-#define METHOD_GET     1
-#define METHOD_PUT     2
-
-// Byte threshold: a request must send or receive more than this many
-// bytes to be classified as PUT or GET.  Below this, it is OTHER
-// (HEAD, DELETE, LIST, small objects, etc.).
-#define CLASSIFY_MIN_BYTES  4096
-
-// Composite key for per-IP, per-method stats.
+// Per-IP stats key (no per-method breakdown — TLS hides HTTP semantics).
 struct stats_key {
     __u32 dest_ip;
-    __u32 method;   // METHOD_*
+    __u32 _pad;
 };
 
 // Track in-flight requests per socket.
@@ -155,21 +147,9 @@ static __always_inline void update_objstore_histogram(__u64 *histogram,
         __sync_fetch_and_add(&histogram[bucket], 1);
 }
 
-// Classify a completed request as GET, PUT, or OTHER based on the
-// ratio of bytes sent vs bytes received.
-static __always_inline __u32 classify_method(__u64 bytes_sent, __u64 bytes_recv)
-{
-    if (bytes_sent > CLASSIFY_MIN_BYTES && bytes_sent > 4 * bytes_recv)
-        return METHOD_PUT;
-    if (bytes_recv > CLASSIFY_MIN_BYTES && bytes_recv > 4 * bytes_sent)
-        return METHOD_GET;
-    return METHOD_OTHER;
-}
-
-// Finalize a completed request: classify by byte ratio, then record all
-// metrics (request count, latency, bytes, histogram) into the appropriate
-// per-method stats bucket.  Called from tcp_sendmsg when it detects a
-// previous request on the same socket, or could be called on socket close.
+// Finalize a completed connection phase: record latency, bytes, and
+// retransmits into the per-IP stats bucket.  Called from tcp_sendmsg
+// when it detects a previous request on the same socket.
 static __always_inline void finalize_request(struct active_request *req)
 {
     // Must have received something to be a completed request
@@ -177,12 +157,9 @@ static __always_inline void finalize_request(struct active_request *req)
         return;
 
     __u64 latency_ns = req->recv_time_ns - req->send_time_ns;
-    __u32 method = classify_method(req->total_bytes_sent,
-                                   req->total_bytes_recv);
 
     struct stats_key skey = {};
     skey.dest_ip = req->dest_ip;
-    skey.method  = method;
 
     struct latency_stats *stats =
         bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);

@@ -60,39 +60,39 @@ func NewObjStoreLatencyCollector(config ObjStoreConfig) (*ObjStoreLatencyCollect
 
 	c := &ObjStoreLatencyCollector{
 		latencyDesc: prometheus.NewDesc(
-			MetricPrefix+"objectstore_latency_seconds",
-			"Object store request latency in seconds",
-			[]string{"endpoint", "operation"},
+			MetricPrefix+"objectstore_connection_latency_seconds",
+			"Object store connection-phase latency in seconds (send-to-recv on same socket)",
+			[]string{"endpoint"},
 			nil,
 		),
 		requestsDesc: prometheus.NewDesc(
-			MetricPrefix+"objectstore_requests_total",
-			"Total number of object store requests",
-			[]string{"endpoint", "operation"},
+			MetricPrefix+"objectstore_connections_total",
+			"Total number of object store connection phases observed",
+			[]string{"endpoint"},
 			nil,
 		),
 		retransmitDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_tcp_retransmits_total",
 			"Total number of TCP retransmissions to object store servers",
-			[]string{"endpoint", "operation"},
+			[]string{"endpoint"},
 			nil,
 		),
 		bytesSentDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_bytes_sent_total",
 			"Total bytes sent to object store servers",
-			[]string{"endpoint", "operation"},
+			[]string{"endpoint"},
 			nil,
 		),
 		bytesRecvDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_bytes_recv_total",
 			"Total bytes received from object store servers",
-			[]string{"endpoint", "operation"},
+			[]string{"endpoint"},
 			nil,
 		),
 		latencyHistDesc: prometheus.NewDesc(
-			MetricPrefix+"objectstore_latency_histogram_seconds",
-			"Histogram of object store request latency in seconds",
-			[]string{"endpoint", "operation"},
+			MetricPrefix+"objectstore_connection_latency_histogram_seconds",
+			"Histogram of object store connection-phase latency in seconds",
+			[]string{"endpoint"},
 			nil,
 		),
 		objStoreEndpoints: make(map[uint32]bool),
@@ -399,8 +399,8 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Iterate over all entries in the map
 	var key struct {
-		DstIP  uint32
-		Method uint32
+		DstIP uint32
+		Pad   uint32
 	}
 	var value struct {
 		RequestCount    uint64
@@ -427,7 +427,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 		// Convert IP to string for the label
 		ipStr := ipUint32ToString(key.DstIP)
-		operation := httpMethodToString(key.Method)
 
 		// Convert nanoseconds to seconds (Prometheus standard)
 		latencySeconds := float64(value.TotalLatency) / 1e9
@@ -438,7 +437,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.RequestCount),
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -446,7 +444,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			latencySeconds,
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -454,7 +451,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.RetransmitCount),
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -462,7 +458,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.BytesSent),
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -470,7 +465,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.BytesRecv),
 			ipStr,
-			operation,
 		)
 
 		histBuckets, histCount, histSum := histogramToBuckets(value.Histogram, objstoreHistogramBucketBoundaries)
@@ -480,7 +474,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			histSum,
 			histBuckets,
 			ipStr,
-			operation,
 		)
 	}
 
@@ -490,21 +483,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 	log.Debugf("Object store metrics collection: %d total entries, %d filtered out, %d emitted",
 		totalEntries, filteredEntries, totalEntries-filteredEntries)
-}
-
-// httpMethodToString maps eBPF METHOD_* constants to Prometheus label strings.
-// Must match the #define values in ebpf/objstore_latency.c:
-//
-//	METHOD_OTHER=0, METHOD_GET=1, METHOD_PUT=2
-func httpMethodToString(method uint32) string {
-	switch method {
-	case 1:
-		return "GET"
-	case 2:
-		return "PUT"
-	default:
-		return "OTHER"
-	}
 }
 
 // matchesTargetIP checks if an IP matches any configured object store endpoint
