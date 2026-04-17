@@ -147,9 +147,28 @@ static __always_inline void update_objstore_histogram(__u64 *histogram,
         __sync_fetch_and_add(&histogram[bucket], 1);
 }
 
-// Finalize a completed connection phase: record latency, bytes, and
-// retransmits into the per-IP stats bucket.  Called from tcp_sendmsg
+// get_or_create_stats looks up (or creates) the per-IP stats entry.
+static __always_inline struct latency_stats *get_or_create_stats(__u32 dest_ip)
+{
+    struct stats_key skey = {};
+    skey.dest_ip = dest_ip;
+
+    struct latency_stats *stats =
+        bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
+    if (stats)
+        return stats;
+
+    // Create a zero-initialized entry.
+    struct latency_stats new_stats = {};
+    bpf_map_update_elem(&objstore_latency_by_ip, &skey, &new_stats, BPF_NOEXIST);
+    return bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
+}
+
+// Finalize a completed connection phase: record latency, request count,
+// and retransmits into the per-IP stats bucket.  Called from tcp_sendmsg
 // when it detects a previous request on the same socket.
+// Note: bytes_sent and bytes_recv are accumulated in real-time (on every
+// send/recv), NOT here, to avoid undercounting on long-lived connections.
 static __always_inline void finalize_request(struct active_request *req)
 {
     // Must have received something to be a completed request
@@ -158,28 +177,12 @@ static __always_inline void finalize_request(struct active_request *req)
 
     __u64 latency_ns = req->recv_time_ns - req->send_time_ns;
 
-    struct stats_key skey = {};
-    skey.dest_ip = req->dest_ip;
-
-    struct latency_stats *stats =
-        bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
+    struct latency_stats *stats = get_or_create_stats(req->dest_ip);
     if (stats) {
         __sync_fetch_and_add(&stats->request_count, 1);
         __sync_fetch_and_add(&stats->total_latency_ns, latency_ns);
-        __sync_fetch_and_add(&stats->bytes_sent, req->total_bytes_sent);
-        __sync_fetch_and_add(&stats->bytes_recv, req->total_bytes_recv);
         __sync_fetch_and_add(&stats->retransmit_count, req->retransmit_count);
         update_objstore_histogram(stats->histogram, latency_ns);
-    } else {
-        struct latency_stats new_stats = {};
-        new_stats.request_count = 1;
-        new_stats.total_latency_ns = latency_ns;
-        new_stats.bytes_sent = req->total_bytes_sent;
-        new_stats.bytes_recv = req->total_bytes_recv;
-        new_stats.retransmit_count = req->retransmit_count;
-        update_objstore_histogram(new_stats.histogram, latency_ns);
-        bpf_map_update_elem(&objstore_latency_by_ip, &skey,
-                            &new_stats, BPF_NOEXIST);
     }
 }
 
@@ -222,6 +225,11 @@ int tcp_sendmsg_entry(struct pt_regs *ctx)
 
     __u64 size = (__u64)PT_REGS_PARM3(ctx);
     __u64 sk_key = (__u64)sk;
+
+    // Always accumulate bytes_sent into the stats map immediately.
+    struct latency_stats *stats = get_or_create_stats(dest_ip);
+    if (stats)
+        __sync_fetch_and_add(&stats->bytes_sent, size);
 
     // Look up existing active_request for this socket.
     struct active_request *existing =
@@ -298,6 +306,13 @@ int tcp_cleanup_rbuf_entry(struct pt_regs *ctx)
         bpf_map_lookup_elem(&active_requests, &sk_key);
     if (!req)
         return 0;
+
+    // Accumulate bytes_recv into the stats map immediately (not deferred
+    // to finalization) so byte counters are accurate even for long-lived
+    // HTTP/2 connections that may never trigger a finalize.
+    struct latency_stats *stats = get_or_create_stats(req->dest_ip);
+    if (stats)
+        __sync_fetch_and_add(&stats->bytes_recv, (__u64)copied);
 
     __sync_fetch_and_add(&req->total_bytes_recv, (__u64)copied);
     // Always update recv_time_ns to the latest receive timestamp.

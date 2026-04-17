@@ -56,25 +56,25 @@ func NewProbeCollector(config ProbeConfig) *ProbeCollector {
 		config: config,
 		nfsPingDesc: prometheus.NewDesc(
 			MetricPrefix+"nfs_ping_latency_seconds",
-			"ICMP ping RTT to NFS server in seconds (0 if probe failed)",
+			"ICMP ping RTT to NFS server in seconds (capped at 1.0 on timeout/failure)",
 			[]string{"endpoint"},
 			nil,
 		),
 		nfsRPCDesc: prometheus.NewDesc(
 			MetricPrefix+"nfs_rpc_probe_latency_seconds",
-			"NFSv4 NULL RPC probe latency in seconds (0 if probe failed)",
+			"NFSv4 NULL RPC probe latency in seconds (capped at 1.0 on timeout/failure)",
 			[]string{"endpoint"},
 			nil,
 		),
 		objStorePingDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_ping_latency_seconds",
-			"ICMP ping RTT to object store server in seconds (0 if probe failed)",
+			"ICMP ping RTT to object store server in seconds (capped at 1.0 on timeout/failure)",
 			[]string{"endpoint"},
 			nil,
 		),
 		objStoreHTTPDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_https_probe_latency_seconds",
-			"HTTPS probe latency to object store in seconds (0 if probe failed)",
+			"HTTPS probe latency to object store in seconds (capped at 1.0 on timeout/failure)",
 			[]string{"endpoint"},
 			nil,
 		),
@@ -95,41 +95,45 @@ func (p *ProbeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- p.objStoreHTTPDesc
 }
 
+// probeLatencyCap is the maximum reported latency for any probe.
+// Failed or timed-out probes are capped at this value so that
+// "no response" is distinguishable from "metric not present" (which
+// looks like zero).
+const probeLatencyCap = 1.0 // seconds
+
+// probeValue returns the latency to emit for a probe result.
+// Successful probes are capped at probeLatencyCap; failed probes
+// are reported as probeLatencyCap (not zero).
+func probeValue(r probeResult) float64 {
+	if !r.Success {
+		return probeLatencyCap
+	}
+	val := r.Latency.Seconds()
+	if val > probeLatencyCap {
+		return probeLatencyCap
+	}
+	return val
+}
+
 // Collect implements prometheus.Collector.
 func (p *ProbeCollector) Collect(ch chan<- prometheus.Metric) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	for _, r := range p.pingResults {
-		val := 0.0
-		if r.Success {
-			val = r.Latency.Seconds()
-		}
-		ch <- prometheus.MustNewConstMetric(p.nfsPingDesc, prometheus.GaugeValue, val, r.IP)
+		ch <- prometheus.MustNewConstMetric(p.nfsPingDesc, prometheus.GaugeValue, probeValue(r), r.IP)
 	}
 
 	for _, r := range p.rpcResults {
-		val := 0.0
-		if r.Success {
-			val = r.Latency.Seconds()
-		}
-		ch <- prometheus.MustNewConstMetric(p.nfsRPCDesc, prometheus.GaugeValue, val, r.IP)
+		ch <- prometheus.MustNewConstMetric(p.nfsRPCDesc, prometheus.GaugeValue, probeValue(r), r.IP)
 	}
 
 	for _, r := range p.objStorePingResults {
-		val := 0.0
-		if r.Success {
-			val = r.Latency.Seconds()
-		}
-		ch <- prometheus.MustNewConstMetric(p.objStorePingDesc, prometheus.GaugeValue, val, r.IP)
+		ch <- prometheus.MustNewConstMetric(p.objStorePingDesc, prometheus.GaugeValue, probeValue(r), r.IP)
 	}
 
 	for _, r := range p.httpsResults {
-		val := 0.0
-		if r.Success {
-			val = r.Latency.Seconds()
-		}
-		ch <- prometheus.MustNewConstMetric(p.objStoreHTTPDesc, prometheus.GaugeValue, val, r.IP)
+		ch <- prometheus.MustNewConstMetric(p.objStoreHTTPDesc, prometheus.GaugeValue, probeValue(r), r.IP)
 	}
 }
 
