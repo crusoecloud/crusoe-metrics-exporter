@@ -23,7 +23,7 @@ var objstoreLatencyBPF []byte
 type ObjStoreConfig struct {
 	InitialIPs      []string      // Initial object store endpoint IPs
 	FQDN            string        // FQDN for periodic DNS re-resolution
-	TargetPort      uint16        // Port to monitor (e.g., 443)
+	TargetPorts     []uint16      // Ports to monitor (default: [443, 80])
 	RefreshInterval time.Duration // How often to re-resolve FQDN (default 5m)
 }
 
@@ -51,8 +51,8 @@ type ObjStoreLatencyCollector struct {
 // NewObjStoreLatencyCollector creates a new object store latency collector
 func NewObjStoreLatencyCollector(config ObjStoreConfig) (*ObjStoreLatencyCollector, error) {
 	// Set defaults
-	if config.TargetPort == 0 {
-		config.TargetPort = 443
+	if len(config.TargetPorts) == 0 {
+		config.TargetPorts = []uint16{443, 80}
 	}
 	if config.RefreshInterval == 0 {
 		config.RefreshInterval = 5 * time.Minute
@@ -118,10 +118,10 @@ func NewObjStoreLatencyCollector(config ObjStoreConfig) (*ObjStoreLatencyCollect
 		return nil, fmt.Errorf("failed to load eBPF program: %w", err)
 	}
 
-	// Configure target port in eBPF program
-	if err := c.configurePort(config.TargetPort); err != nil {
+	// Configure target ports in eBPF program
+	if err := c.configurePorts(config.TargetPorts); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("failed to configure port: %w", err)
+		return nil, fmt.Errorf("failed to configure ports: %w", err)
 	}
 
 	// Attach kprobes
@@ -168,38 +168,35 @@ func (c *ObjStoreLatencyCollector) loadBPF() error {
 	return nil
 }
 
-// configurePort sets the target port in the eBPF config map
-func (c *ObjStoreLatencyCollector) configurePort(port uint16) error {
+// configurePorts sets the target ports in the eBPF config map.
+// Up to 4 ports are supported; unused slots are zeroed.
+func (c *ObjStoreLatencyCollector) configurePorts(ports []uint16) error {
 	configMap := c.objs.Maps["config_map"]
 	if configMap == nil {
 		return fmt.Errorf("config_map not found in eBPF collection")
 	}
 
-	// Config structure matching the C struct
-	config := struct {
-		TargetPort uint16
-		Padding    uint16
-	}{
-		TargetPort: port,
-		Padding:    0,
+	// Config structure matching the C struct (MAX_TARGET_PORTS = 4)
+	var config struct {
+		TargetPorts [4]uint16
+	}
+	for i := 0; i < len(ports) && i < 4; i++ {
+		config.TargetPorts[i] = ports[i]
 	}
 
-	// Key is always 0 for the single config entry
 	var key uint32 = 0
-
 	if err := configMap.Put(&key, &config); err != nil {
 		return fmt.Errorf("failed to set port config: %w", err)
 	}
 
 	// Verify the config was written correctly
 	var readConfig struct {
-		TargetPort uint16
-		Padding    uint16
+		TargetPorts [4]uint16
 	}
 	if err := configMap.Lookup(&key, &readConfig); err != nil {
 		log.Warnf("failed to verify config was written: %v", err)
 	} else {
-		log.Infof("Configured eBPF to track port %d (verified: config map contains port=%d)", port, readConfig.TargetPort)
+		log.Infof("Configured eBPF to track ports %v (verified: config map contains %v)", ports, readConfig.TargetPorts)
 	}
 
 	return nil

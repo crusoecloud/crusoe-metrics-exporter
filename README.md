@@ -46,7 +46,7 @@ See [BUILD_TEST.md](BUILD_TEST.md) for details on how to build/test eBPF locally
 | `PROBE_INTERVAL` | `5m` | How often to run health probes (ICMP ping, NFS RPC, HTTPS). Go duration format (e.g. `30s`, `2m`). Defaults to 5m, as it's not usually useful for a single VM, more for aggregate across a fleet |
 | `OBJSTORE_ENDPOINT_FQDN` | - | Object store endpoint FQDN, resolved via DNS to up to 16 IPs (preferred; required to enable collector unless `OBJSTORE_ENDPOINT_IPS` is set) |
 | `OBJSTORE_ENDPOINT_IPS` | - | Comma-separated object store endpoint IPs (legacy fallback; ignored when `OBJSTORE_ENDPOINT_FQDN` is set) |
-| `OBJSTORE_ENDPOINT_PORT` | `443` | Port to monitor for object store traffic |
+| `OBJSTORE_ENDPOINT_PORT` | `443,80` | Comma-separated ports to monitor for object store traffic (up to 4) |
 | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`, `fatal`) |
 
 ### Endpoints

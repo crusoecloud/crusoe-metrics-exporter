@@ -23,10 +23,11 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 // Structures
 // -----------------------------------------------------------------------
 
-// Configuration structure expected by Go collector
+// Configuration structure expected by Go collector.
+// Supports up to 4 target ports (e.g. 80 and 443).  Unused slots are 0.
+#define MAX_TARGET_PORTS 4
 struct config {
-    __u16 target_port;  // network byte order
-    __u16 padding;
+    __u16 target_ports[MAX_TARGET_PORTS];  // host byte order; 0 = unused
 };
 
 // Per-IP stats key (no per-method breakdown — TLS hides HTTP semantics).
@@ -62,7 +63,7 @@ struct latency_stats {
 // Maps
 // -----------------------------------------------------------------------
 
-// Config map -- Go collector writes the target port here.
+// Config map -- Go collector writes the target ports here.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -97,6 +98,25 @@ struct {
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
+
+// Check whether dest_port matches one of the configured target ports.
+// dest_port is in network byte order (as read from skc_dport).
+static __always_inline bool is_target_port(__u16 dest_port)
+{
+    __u32 cfg_key = 0;
+    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (!cfg)
+        return true;  // no config = accept all ports
+
+    for (int i = 0; i < MAX_TARGET_PORTS; i++) {
+        __u16 p = cfg->target_ports[i];
+        if (p == 0)
+            break;
+        if (dest_port == bpf_htons(p))
+            return true;
+    }
+    return false;
+}
 
 // Check whether dest_ip is one of the known object store server IPs.
 static __always_inline bool is_objstore_server(__u32 dest_ip)
@@ -210,16 +230,9 @@ int tcp_sendmsg_entry(struct pt_regs *ctx)
     __u32 dest_ip   = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     __u16 dest_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
 
-    // Check target port from config (port is in network byte order)
-    __u32 cfg_key = 0;
-    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (cfg) {
-        __u16 target_port_net = bpf_htons(cfg->target_port);
-        if (dest_port != target_port_net)
-            return 0;
-    }
-
-    // Check if this destination is a known object store server
+    // Check target port and destination IP
+    if (!is_target_port(dest_port))
+        return 0;
     if (!is_objstore_server(dest_ip))
         return 0;
 
@@ -287,14 +300,9 @@ int tcp_cleanup_rbuf_entry(struct pt_regs *ctx)
     __u32 dest_ip   = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     __u16 dest_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
 
-    __u32 cfg_key = 0;
-    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (cfg) {
-        __u16 target_port_net = bpf_htons(cfg->target_port);
-        if (dest_port != target_port_net)
-            return 0;
-    }
-
+    // Check target port and destination IP
+    if (!is_target_port(dest_port))
+        return 0;
     if (!is_objstore_server(dest_ip))
         return 0;
 

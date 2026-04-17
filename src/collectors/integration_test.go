@@ -47,7 +47,7 @@ func TestRealIPIntegration(t *testing.T) {
 		testIPs := []string{"100.63.0.10"}
 		targetPort := uint16(8080)
 
-		collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPort: targetPort})
+		collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 		if err != nil {
 			t.Skip("Skipping Object Store integration test - collector creation failed")
 			return
@@ -71,8 +71,8 @@ func TestRealIPIntegration(t *testing.T) {
 // TestIPByteOrderRegression tests specific byte order scenarios that caused issues
 func TestIPByteOrderRegression(t *testing.T) {
 	testCases := []struct {
-		name        string
-		ipString    string
+		name         string
+		ipString     string
 		littleEndian uint32
 		bigEndian    uint32
 	}{
@@ -84,7 +84,7 @@ func TestIPByteOrderRegression(t *testing.T) {
 		},
 		{
 			name:         "100.63.0.10",
-			ipString:     "100.63.0.10", 
+			ipString:     "100.63.0.10",
 			littleEndian: 0x0a003f64, // [64,3f,00,0a] LE
 			bigEndian:    0x643f000a, // [64,3f,00,0a] BE
 		},
@@ -114,24 +114,24 @@ func TestIPByteOrderRegression(t *testing.T) {
 
 			// Verify little-endian conversion
 			if actualLittleEndian != tc.littleEndian {
-				t.Errorf("Little-endian conversion error: got 0x%08x, expected 0x%08x", 
+				t.Errorf("Little-endian conversion error: got 0x%08x, expected 0x%08x",
 					actualLittleEndian, tc.littleEndian)
 			}
 
 			// Verify big-endian conversion
 			if actualBigEndian != tc.bigEndian {
-				t.Errorf("Big-endian conversion error: got 0x%08x, expected 0x%08x", 
+				t.Errorf("Big-endian conversion error: got 0x%08x, expected 0x%08x",
 					actualBigEndian, tc.bigEndian)
 			}
 
 			// They should be different for these test IPs
 			if actualLittleEndian == actualBigEndian {
-				t.Errorf("Little-endian and big-endian values are identical (0x%08x) for IP %s", 
+				t.Errorf("Little-endian and big-endian values are identical (0x%08x) for IP %s",
 					actualLittleEndian, tc.ipString)
 			}
 
 			// Log the conversion that would be used in collectors
-			t.Logf("✅ IP %s: little-endian 0x%08x (eBPF), big-endian 0x%08x (network)", 
+			t.Logf("✅ IP %s: little-endian 0x%08x (eBPF), big-endian 0x%08x (network)",
 				tc.ipString, actualLittleEndian, actualBigEndian)
 		})
 	}
@@ -140,7 +140,7 @@ func TestIPByteOrderRegression(t *testing.T) {
 // TestCrossCollectorByteOrderConsistency ensures both collectors use the same byte order
 func TestCrossCollectorByteOrderConsistency(t *testing.T) {
 	testIP := "10.0.1.100"
-	
+
 	parsedIP := net.ParseIP(testIP)
 	if parsedIP == nil {
 		t.Fatalf("Failed to parse IP %s", testIP)
@@ -153,23 +153,23 @@ func TestCrossCollectorByteOrderConsistency(t *testing.T) {
 	// Test NFS collector conversion
 	nfsValue := binary.LittleEndian.Uint32(ipv4)
 
-	// Test Object Store collector conversion  
+	// Test Object Store collector conversion
 	objStoreValue := binary.LittleEndian.Uint32(ipv4)
 
 	// They should be identical
 	if nfsValue != objStoreValue {
-		t.Errorf("Inconsistent byte order between collectors: NFS=0x%08x, ObjectStore=0x%08x", 
+		t.Errorf("Inconsistent byte order between collectors: NFS=0x%08x, ObjectStore=0x%08x",
 			nfsValue, objStoreValue)
 	}
 
 	// Verify it's the expected little-endian value
 	expected := uint32(0x6401000a) // 10.0.1.100 in little-endian
 	if nfsValue != expected || objStoreValue != expected {
-		t.Errorf("Both should be 0x%08x: NFS=0x%08x, ObjectStore=0x%08x", 
+		t.Errorf("Both should be 0x%08x: NFS=0x%08x, ObjectStore=0x%08x",
 			expected, nfsValue, objStoreValue)
 	}
 
-	t.Logf("✅ Both collectors use consistent little-endian value 0x%08x for IP %s", 
+	t.Logf("✅ Both collectors use consistent little-endian value 0x%08x for IP %s",
 		nfsValue, testIP)
 }
 

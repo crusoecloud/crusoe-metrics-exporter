@@ -145,20 +145,24 @@ func main() {
 		}
 	}
 
-	objStorePort := uint16(443)
+	var objStorePorts []uint16
 	if portStr := os.Getenv("OBJSTORE_ENDPOINT_PORT"); portStr != "" {
-		if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-			objStorePort = uint16(port)
-		} else {
-			log.Warnf("Invalid OBJSTORE_ENDPOINT_PORT '%s', using default 443", portStr)
+		for _, ps := range strings.Split(portStr, ",") {
+			ps = strings.TrimSpace(ps)
+			if port, err := strconv.ParseUint(ps, 10, 16); err == nil {
+				objStorePorts = append(objStorePorts, uint16(port))
+			} else {
+				log.Warnf("Invalid port '%s' in OBJSTORE_ENDPOINT_PORT, skipping", ps)
+			}
 		}
 	}
+	// Default [443, 80] is applied inside NewObjStoreLatencyCollector if empty.
 
 	if len(objStoreIPs) > 0 {
 		objStoreConfig := collectors.ObjStoreConfig{
-			InitialIPs: objStoreIPs,
-			FQDN:       objStoreFQDN,
-			TargetPort: objStorePort,
+			InitialIPs:  objStoreIPs,
+			FQDN:        objStoreFQDN,
+			TargetPorts: objStorePorts,
 		}
 
 		objStoreCollector, err := collectors.NewObjStoreLatencyCollector(objStoreConfig)
@@ -167,7 +171,7 @@ func main() {
 		} else {
 			registry.MustRegister(objStoreCollector)
 			defer objStoreCollector.Close()
-			log.Infof("Object store latency collector enabled for IPs: %v, port: %d, fqdn: %q", objStoreIPs, objStorePort, objStoreFQDN)
+			log.Infof("Object store latency collector enabled for IPs: %v, ports: %v, fqdn: %q", objStoreIPs, objStorePorts, objStoreFQDN)
 		}
 	}
 

@@ -81,12 +81,19 @@ func parseNFSConfigFromEnv() NFSConfig {
 // parseObjStoreConfigFromEnv mirrors the objstore config parsing in main.go
 func parseObjStoreConfigFromEnv() ObjStoreConfig {
 	config := ObjStoreConfig{
-		TargetPort: 443,
+		TargetPorts: []uint16{443, 80},
 	}
 
 	if portStr := os.Getenv("OBJSTORE_ENDPOINT_PORT"); portStr != "" {
-		if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-			config.TargetPort = uint16(port)
+		var ports []uint16
+		for _, ps := range strings.Split(portStr, ",") {
+			ps = strings.TrimSpace(ps)
+			if port, err := strconv.ParseUint(ps, 10, 16); err == nil {
+				ports = append(ports, uint16(port))
+			}
+		}
+		if len(ports) > 0 {
+			config.TargetPorts = ports
 		}
 	}
 
@@ -146,9 +153,9 @@ func TestNFSEnvVarParsing(t *testing.T) {
 		{
 			name: "all env vars set",
 			envVars: map[string]string{
-				"NFS_SERVER_IPS":  "10.0.1.100,192.168.1.50",
-				"NFS_TARGET_PORTS": "2049,20490",
-				"NFS_PROTOCOLS":    "tcp",
+				"NFS_SERVER_IPS":       "10.0.1.100,192.168.1.50",
+				"NFS_TARGET_PORTS":     "2049,20490",
+				"NFS_PROTOCOLS":        "tcp",
 				"NFS_ENABLE_VOLUME_ID": "true",
 			},
 			expectIPs:      []string{"10.0.1.100", "192.168.1.50"},
@@ -157,8 +164,8 @@ func TestNFSEnvVarParsing(t *testing.T) {
 			expectVolumeID: true,
 		},
 		{
-			name:    "defaults when no env vars",
-			envVars: map[string]string{},
+			name:           "defaults when no env vars",
+			envVars:        map[string]string{},
 			expectIPs:      []string{},
 			expectPorts:    []uint16{2049},
 			expectProtos:   []string{"tcp", "udp"},
@@ -264,10 +271,10 @@ func TestNFSEnvVarParsing(t *testing.T) {
 
 func TestObjStoreEnvVarParsing(t *testing.T) {
 	tests := []struct {
-		name       string
-		envVars    map[string]string
-		expectIPs  []string
-		expectPort uint16
+		name        string
+		envVars     map[string]string
+		expectIPs   []string
+		expectPorts []uint16
 	}{
 		{
 			name: "IPs and custom port",
@@ -275,21 +282,21 @@ func TestObjStoreEnvVarParsing(t *testing.T) {
 				"OBJSTORE_ENDPOINT_IPS":  "100.63.0.10,100.63.0.11",
 				"OBJSTORE_ENDPOINT_PORT": "8080",
 			},
-			expectIPs:  []string{"100.63.0.10", "100.63.0.11"},
-			expectPort: 8080,
+			expectIPs:   []string{"100.63.0.10", "100.63.0.11"},
+			expectPorts: []uint16{8080},
 		},
 		{
-			name:       "defaults",
-			envVars:    map[string]string{},
-			expectIPs:  nil,
-			expectPort: 443,
+			name:        "defaults",
+			envVars:     map[string]string{},
+			expectIPs:   nil,
+			expectPorts: []uint16{443, 80},
 		},
 		{
 			name: "invalid port keeps default",
 			envVars: map[string]string{
 				"OBJSTORE_ENDPOINT_PORT": "notaport",
 			},
-			expectPort: 443,
+			expectPorts: []uint16{443, 80},
 		},
 	}
 
@@ -327,8 +334,14 @@ func TestObjStoreEnvVarParsing(t *testing.T) {
 				}
 			}
 
-			if config.TargetPort != tt.expectPort {
-				t.Errorf("Port: got %d, want %d", config.TargetPort, tt.expectPort)
+			if len(config.TargetPorts) != len(tt.expectPorts) {
+				t.Errorf("Ports: got %v, want %v", config.TargetPorts, tt.expectPorts)
+			} else {
+				for i, port := range tt.expectPorts {
+					if config.TargetPorts[i] != port {
+						t.Errorf("Ports[%d]: got %d, want %d", i, config.TargetPorts[i], port)
+					}
+				}
 			}
 		})
 	}
@@ -556,7 +569,7 @@ func TestObjStoreIPsPropagatedToEBPFMap(t *testing.T) {
 	// Verifies: env OBJSTORE_ENDPOINT_IPS -> filterIPs -> objstore_server_ips eBPF map
 	testIPs := []string{"100.63.0.10", "100.63.0.11"}
 
-	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPort: 8080})
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{8080}})
 	if err != nil {
 		t.Skipf("Skipping eBPF integration test (expected on non-Linux): %v", err)
 		return
@@ -604,8 +617,8 @@ func TestObjStoreIPsPropagatedToEBPFMap(t *testing.T) {
 }
 
 func TestObjStorePortPropagatedToEBPFMap(t *testing.T) {
-	// Verifies: env OBJSTORE_ENDPOINT_PORT -> targetPort -> config_map eBPF map
-	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: []string{"100.63.0.10"}, TargetPort: 8080})
+	// Verifies: env OBJSTORE_ENDPOINT_PORT -> targetPorts -> config_map eBPF map
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: []string{"100.63.0.10"}, TargetPorts: []uint16{8080, 443}})
 	if err != nil {
 		t.Skipf("Skipping eBPF integration test (expected on non-Linux): %v", err)
 		return
@@ -619,16 +632,15 @@ func TestObjStorePortPropagatedToEBPFMap(t *testing.T) {
 
 	var key uint32 = 0
 	var val struct {
-		TargetPort uint16
-		Padding    uint16
+		TargetPorts [4]uint16
 	}
 	if err := configMap.Lookup(&key, &val); err != nil {
 		t.Fatalf("Failed to read config_map: %v", err)
 	}
 
-	if val.TargetPort != 8080 {
-		t.Errorf("config_map target_port: got %d, want 8080 -- "+
-			"targetPort is not being propagated to the eBPF config_map", val.TargetPort)
+	if val.TargetPorts[0] != 8080 || val.TargetPorts[1] != 443 {
+		t.Errorf("config_map target_ports: got %v, want [8080, 443, 0, 0] -- "+
+			"targetPorts is not being propagated to the eBPF config_map", val.TargetPorts)
 	}
 }
 
@@ -723,8 +735,8 @@ func TestEndToEndObjStoreEnvToEBPF(t *testing.T) {
 	if len(config.InitialIPs) != 1 || config.InitialIPs[0] != "100.63.0.10" {
 		t.Fatalf("parseObjStoreConfigFromEnv returned IPs %v, want [100.63.0.10]", config.InitialIPs)
 	}
-	if config.TargetPort != 8080 {
-		t.Fatalf("parseObjStoreConfigFromEnv returned port %d, want 8080", config.TargetPort)
+	if len(config.TargetPorts) != 1 || config.TargetPorts[0] != 8080 {
+		t.Fatalf("parseObjStoreConfigFromEnv returned ports %v, want [8080]", config.TargetPorts)
 	}
 
 	collector, err := NewObjStoreLatencyCollector(config)
@@ -769,16 +781,15 @@ func TestEndToEndObjStoreEnvToEBPF(t *testing.T) {
 
 	var key uint32 = 0
 	var val struct {
-		TargetPort uint16
-		Padding    uint16
+		TargetPorts [4]uint16
 	}
 	if err := configMap.Lookup(&key, &val); err != nil {
 		t.Fatalf("Failed to read config_map: %v", err)
 	}
 
-	if val.TargetPort != 8080 {
-		t.Errorf("OBJSTORE_ENDPOINT_PORT=8080 not propagated to config_map (got %d). "+
-			"Env var is not reaching the eBPF map.", val.TargetPort)
+	if val.TargetPorts[0] != 8080 {
+		t.Errorf("OBJSTORE_ENDPOINT_PORT=8080 not propagated to config_map (got %v). "+
+			"Env var is not reaching the eBPF map.", val.TargetPorts)
 	}
 }
 
@@ -863,8 +874,8 @@ func TestObjStoreEnvVarParsing_FQDN(t *testing.T) {
 		t.Skip("Skipping: DNS resolution not available in this environment")
 	}
 
-	if config.TargetPort != 443 {
-		t.Errorf("Port: got %d, want 443", config.TargetPort)
+	if len(config.TargetPorts) == 0 || config.TargetPorts[0] != 443 {
+		t.Errorf("Ports: got %v, want [443, ...]", config.TargetPorts)
 	}
 
 	for _, ip := range config.InitialIPs {
