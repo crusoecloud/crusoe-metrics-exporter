@@ -298,35 +298,29 @@ int tcp_cleanup_rbuf_entry(struct pt_regs *ctx)
     if (!is_objstore_server(dest_ip))
         return 0;
 
-    // Look up the active request for this socket and accumulate recv bytes.
-    // We do NOT finalize here -- that happens on the next tcp_sendmsg,
-    // which signals the start of a new HTTP request.
-    __u64 sk_key = (__u64)sk;
-    struct active_request *req =
-        bpf_map_lookup_elem(&active_requests, &sk_key);
-    if (!req)
-        return 0;
-
-    // Accumulate bytes_recv into the stats map immediately (not deferred
-    // to finalization) so byte counters are accurate even for long-lived
-    // HTTP/2 connections that may never trigger a finalize.
-    struct latency_stats *stats = get_or_create_stats(req->dest_ip);
+    // Always accumulate bytes_recv into the per-IP stats map, even if
+    // there is no active_request for this socket (e.g. socket predates
+    // probe load, or active_request was evicted).
+    struct latency_stats *stats = get_or_create_stats(dest_ip);
     if (stats)
         __sync_fetch_and_add(&stats->bytes_recv, (__u64)copied);
 
-    __sync_fetch_and_add(&req->total_bytes_recv, (__u64)copied);
-    // Always update recv_time_ns to the latest receive timestamp.
-    // Use a direct write (not atomic) since only one CPU handles
-    // a given socket's receive path at a time.
-    req->recv_time_ns = bpf_ktime_get_ns();
+    // If there is an active_request, also update it for latency tracking.
+    __u64 sk_key = (__u64)sk;
+    struct active_request *req =
+        bpf_map_lookup_elem(&active_requests, &sk_key);
+    if (req) {
+        __sync_fetch_and_add(&req->total_bytes_recv, (__u64)copied);
+        // Always update recv_time_ns to the latest receive timestamp.
+        req->recv_time_ns = bpf_ktime_get_ns();
+    }
     return 0;
 }
 
 // tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 //
 // Fires on every TCP retransmission.  We accumulate retransmits in the
-// active request so they get attributed to the correct operation
-// (PUT/GET/OTHER) when the request is finalized.
+// active request so they get recorded when the request is finalized.
 SEC("kprobe/tcp_retransmit_skb")
 int tcp_retransmit_entry(struct pt_regs *ctx)
 {

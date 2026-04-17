@@ -43,6 +43,7 @@ See [BUILD_TEST.md](BUILD_TEST.md) for details on how to build/test eBPF locally
 | `NFS_TARGET_PORTS` | `2049` | Comma-separated NFS target ports |
 | `NFS_ENABLE_VOLUME_ID` | `true` | Enable volume ID extraction from mount paths |
 | `NFS_MOUNT_REFRESH_INTERVAL` | `30s` | How often to re-scan mounts for new NFS volumes |
+| `PROBE_INTERVAL` | `5m` | How often to run health probes (ICMP ping, NFS RPC, HTTPS). Go duration format (e.g. `30s`, `2m`). Defaults to 5m, as it's not usually useful for a single VM, more for aggregate across a fleet |
 | `OBJSTORE_ENDPOINT_FQDN` | - | Object store endpoint FQDN, resolved via DNS to up to 16 IPs (preferred; required to enable collector unless `OBJSTORE_ENDPOINT_IPS` is set) |
 | `OBJSTORE_ENDPOINT_IPS` | - | Comma-separated object store endpoint IPs (legacy fallback; ignored when `OBJSTORE_ENDPOINT_FQDN` is set) |
 | `OBJSTORE_ENDPOINT_PORT` | `443` | Port to monitor for object store traffic |

@@ -156,9 +156,9 @@ func main() {
 
 	if len(objStoreIPs) > 0 {
 		objStoreConfig := collectors.ObjStoreConfig{
-			InitialIPs:      objStoreIPs,
-			FQDN:            objStoreFQDN,
-			TargetPort:      objStorePort,
+			InitialIPs: objStoreIPs,
+			FQDN:       objStoreFQDN,
+			TargetPort: objStorePort,
 		}
 
 		objStoreCollector, err := collectors.NewObjStoreLatencyCollector(objStoreConfig)
@@ -172,9 +172,19 @@ func main() {
 	}
 
 	// Health probe collector (ICMP ping, NFS RPC, HTTPS probes)
+	probeInterval := 5 * time.Minute
+	if intervalStr := os.Getenv("PROBE_INTERVAL"); intervalStr != "" {
+		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
+			probeInterval = d
+		} else {
+			log.Warnf("Invalid PROBE_INTERVAL '%s', using default 5m", intervalStr)
+		}
+	}
+
 	probeConfig := collectors.ProbeConfig{
 		ObjStoreFQDN:   objStoreFQDN,
 		HostMountsPath: hostMountsPath,
+		ProbeInterval:  probeInterval,
 		MaxJitter:      30 * time.Second,
 	}
 	probeCollector := collectors.NewProbeCollector(probeConfig)
