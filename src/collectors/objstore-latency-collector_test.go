@@ -105,7 +105,7 @@ func TestObjStoreServerIPsMapPopulation(t *testing.T) {
 	testIPs := []string{"100.63.0.10", "10.234.1.180"}
 	targetPort := uint16(8080)
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return
@@ -133,7 +133,7 @@ func TestObjStoreMetricsWithRealIPs(t *testing.T) {
 	testIPs := []string{"100.63.0.10"}
 	targetPort := uint16(8080)
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return
@@ -183,7 +183,7 @@ func TestObjStoreHostnameResolution(t *testing.T) {
 	testHosts := []string{"localhost"} // Use localhost as it should resolve in test environment
 	targetPort := uint16(8080)
 
-	collector, err := NewObjStoreLatencyCollector(testHosts, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testHosts, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return
@@ -211,7 +211,7 @@ func TestObjStoreMultipleEndpoints(t *testing.T) {
 	testIPs := []string{"100.63.0.10", "10.234.1.180", "10.234.1.132"}
 	targetPort := uint16(8080)
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return
@@ -263,7 +263,7 @@ func TestObjStoreDefaultEndpoints(t *testing.T) {
 	testIPs := []string{}
 	targetPort := uint16(443)
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return
@@ -425,7 +425,7 @@ func TestObjStoreEBPFMapPopulation(t *testing.T) {
 	testIPs := []string{"100.63.0.10", "10.234.1.180"}
 	targetPort := uint16(8080)
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return
@@ -447,7 +447,7 @@ func TestObjStoreIPFilteringConsistency(t *testing.T) {
 	testIPs := []string{"100.63.0.10"}
 	targetPort := uint16(8080)
 
-	collector, err := NewObjStoreLatencyCollector(testIPs, targetPort)
+	collector, err := NewObjStoreLatencyCollector(ObjStoreConfig{InitialIPs: testIPs, TargetPorts: []uint16{targetPort}})
 	if err != nil {
 		t.Skip("Skipping test - collector creation failed (expected in test environment)")
 		return

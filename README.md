@@ -43,8 +43,10 @@ See [BUILD_TEST.md](BUILD_TEST.md) for details on how to build/test eBPF locally
 | `NFS_TARGET_PORTS` | `2049` | Comma-separated NFS target ports |
 | `NFS_ENABLE_VOLUME_ID` | `true` | Enable volume ID extraction from mount paths |
 | `NFS_MOUNT_REFRESH_INTERVAL` | `30s` | How often to re-scan mounts for new NFS volumes |
-| `OBJSTORE_ENDPOINT_IPS` | - | Comma-separated object store endpoint IPs (required to enable collector) |
-| `OBJSTORE_ENDPOINT_PORT` | `443` | Port to monitor for object store traffic |
+| `PROBE_INTERVAL` | `5m` | How often to run health probes (ICMP ping, NFS RPC, HTTPS). Go duration format (e.g. `30s`, `2m`). Defaults to 5m, as it's not usually useful for a single VM, more for aggregate across a fleet |
+| `OBJSTORE_ENDPOINT_FQDN` | - | Object store endpoint FQDN, resolved via DNS to up to 16 IPs (preferred; required to enable collector unless `OBJSTORE_ENDPOINT_IPS` is set) |
+| `OBJSTORE_ENDPOINT_IPS` | - | Comma-separated object store endpoint IPs (legacy fallback; ignored when `OBJSTORE_ENDPOINT_FQDN` is set) |
+| `OBJSTORE_ENDPOINT_PORT` | `443,80` | Comma-separated ports to monitor for object store traffic (up to 4) |
 | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`, `fatal`) |
 
 ### Endpoints
@@ -122,20 +124,22 @@ Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. 
 | `crusoe_vm_nfs_bytes_recv_total` | Counter | `volume_id`, `nfs_operation` | Total bytes received (from mountstats) |
 | `crusoe_vm_nfs_stats_collection_errors_total` | Counter | - | Collection errors |
 
-### Object Store Latency Collector (eBPF)
+### Object Store Connection Collector (eBPF)
 
 **Source:** `src/collectors/objstore-latency-collector.go` | **eBPF:** `ebpf/objstore_latency.c`
 
-Measures object store (S3-compatible) request latency using eBPF kprobes on `tcp_sendmsg` / `tcp_cleanup_rbuf`, filtered to configured endpoint IPs. Also tracks TCP retransmissions via `tcp_retransmit_skb`. Enabled only when `OBJSTORE_ENDPOINT_IPS` is set.
+Measures object store (S3-compatible) connection-level latency, byte throughput, and TCP retransmissions using eBPF kprobes on `tcp_sendmsg` / `tcp_cleanup_rbuf` / `tcp_retransmit_skb`, filtered to configured endpoint IPs. Enabled when `OBJSTORE_ENDPOINT_FQDN` or `OBJSTORE_ENDPOINT_IPS` is set. The preferred configuration is `OBJSTORE_ENDPOINT_FQDN` (e.g. `object.eu-iceland1-a.crusoecloudcompute.com`), which is resolved via DNS at startup.
+
+> **Note:** With TLS/HTTP2, per-request GET/PUT classification is not possible from the TCP layer. These metrics report aggregate connection-phase statistics per endpoint. Per-request latency should be measured via a proxy-based approach.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `crusoe_vm_objectstore_latency_seconds` | Counter | `endpoint`, `operation` | Total request latency (seconds) |
-| `crusoe_vm_objectstore_requests_total` | Counter | `endpoint`, `operation` | Total requests (one per HTTP response) |
-| `crusoe_vm_objectstore_tcp_retransmits_total` | Counter | `endpoint`, `operation` | TCP retransmissions to object store |
-| `crusoe_vm_objectstore_bytes_sent_total` | Counter | `endpoint`, `operation` | Total bytes sent to object store |
-| `crusoe_vm_objectstore_bytes_recv_total` | Counter | `endpoint`, `operation` | Total bytes received from object store |
-| `crusoe_vm_objectstore_latency_histogram_seconds` | Histogram | `endpoint`, `operation` | Latency histogram (20 geometric buckets, 0.1ms--25ms) |
+| `crusoe_vm_objectstore_connection_latency_seconds` | Counter | `endpoint` | Total connection-phase latency (seconds) |
+| `crusoe_vm_objectstore_connections_total` | Counter | `endpoint` | Total connection phases observed |
+| `crusoe_vm_objectstore_tcp_retransmits_total` | Counter | `endpoint` | TCP retransmissions to object store |
+| `crusoe_vm_objectstore_bytes_sent_total` | Counter | `endpoint` | Total bytes sent to object store |
+| `crusoe_vm_objectstore_bytes_recv_total` | Counter | `endpoint` | Total bytes received from object store |
+| `crusoe_vm_objectstore_connection_latency_histogram_seconds` | Histogram | `endpoint` | Connection-phase latency histogram (20 geometric buckets, 1ms--1000ms) |
 
 ### PromQL Examples
 
@@ -149,8 +153,8 @@ rate(crusoe_vm_nfs_rpc_timeouts_total[5m]) / rate(crusoe_vm_nfs_rpc_count_total[
 # NFS TCP retransmit rate
 rate(crusoe_vm_nfs_tcp_retransmits_total[5m])
 
-# Object store average latency per endpoint
-rate(crusoe_vm_objectstore_latency_seconds[5m]) / rate(crusoe_vm_objectstore_requests_total[5m])
+# Object store average connection latency per endpoint
+rate(crusoe_vm_objectstore_connection_latency_seconds[5m]) / rate(crusoe_vm_objectstore_connections_total[5m])
 
 # Object store TCP retransmit rate
 rate(crusoe_vm_objectstore_tcp_retransmits_total[5m])

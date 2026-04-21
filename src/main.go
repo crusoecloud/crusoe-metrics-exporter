@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"metrics-exporter/src/collectors"
 	"metrics-exporter/src/log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -82,7 +84,7 @@ func main() {
 		}
 	}
 
-	mountRefreshInterval := 30 * time.Second
+	mountRefreshInterval := 5 * time.Minute
 	if intervalStr := os.Getenv("NFS_MOUNT_REFRESH_INTERVAL"); intervalStr != "" {
 		if interval, err := time.ParseDuration(intervalStr); err == nil {
 			mountRefreshInterval = interval
@@ -123,7 +125,18 @@ func main() {
 
 	// Object store latency collector (eBPF-based)
 	objStoreIPs := []string{}
-	if ipsStr := os.Getenv("OBJSTORE_ENDPOINT_IPS"); ipsStr != "" {
+	objStoreFQDN := ""
+	if fqdn := os.Getenv("OBJSTORE_ENDPOINT_FQDN"); fqdn != "" {
+		fqdn = strings.TrimSpace(fqdn)
+		objStoreFQDN = fqdn
+		resolved, err := resolveObjStoreFQDN(fqdn)
+		if err != nil {
+			log.Errorf("Failed to resolve OBJSTORE_ENDPOINT_FQDN=%q: %v", fqdn, err)
+		} else {
+			objStoreIPs = resolved
+			log.Infof("Resolved OBJSTORE_ENDPOINT_FQDN=%q to %d IPs: %v", fqdn, len(resolved), resolved)
+		}
+	} else if ipsStr := os.Getenv("OBJSTORE_ENDPOINT_IPS"); ipsStr != "" {
 		for _, ip := range strings.Split(ipsStr, ",") {
 			ip = strings.TrimSpace(ip)
 			if ip != "" {
@@ -132,25 +145,59 @@ func main() {
 		}
 	}
 
-	if len(objStoreIPs) > 0 {
-		objStorePort := uint16(443)
-		if portStr := os.Getenv("OBJSTORE_ENDPOINT_PORT"); portStr != "" {
-			if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-				objStorePort = uint16(port)
+	var objStorePorts []uint16
+	if portStr := os.Getenv("OBJSTORE_ENDPOINT_PORT"); portStr != "" {
+		for _, ps := range strings.Split(portStr, ",") {
+			ps = strings.TrimSpace(ps)
+			if port, err := strconv.ParseUint(ps, 10, 16); err == nil {
+				objStorePorts = append(objStorePorts, uint16(port))
 			} else {
-				log.Warnf("Invalid OBJSTORE_ENDPOINT_PORT '%s', using default 443", portStr)
+				log.Warnf("Invalid port '%s' in OBJSTORE_ENDPOINT_PORT, skipping", ps)
 			}
 		}
+	}
+	// Default [443, 80] is applied inside NewObjStoreLatencyCollector if empty.
 
-		objStoreCollector, err := collectors.NewObjStoreLatencyCollector(objStoreIPs, objStorePort)
+	if len(objStoreIPs) > 0 {
+		objStoreConfig := collectors.ObjStoreConfig{
+			InitialIPs:  objStoreIPs,
+			FQDN:        objStoreFQDN,
+			TargetPorts: objStorePorts,
+		}
+
+		objStoreCollector, err := collectors.NewObjStoreLatencyCollector(objStoreConfig)
 		if err != nil {
 			log.Errorf("Failed to create object store latency collector: %v (continuing without object store metrics)", err)
 		} else {
 			registry.MustRegister(objStoreCollector)
 			defer objStoreCollector.Close()
-			log.Infof("Object store latency collector enabled for IPs: %v, port: %d", objStoreIPs, objStorePort)
+			log.Infof("Object store latency collector enabled for IPs: %v, ports: %v, fqdn: %q", objStoreIPs, objStorePorts, objStoreFQDN)
 		}
 	}
+
+	// Health probe collector (ICMP ping, NFS RPC, HTTPS probes)
+	probeInterval := 5 * time.Minute
+	if intervalStr := os.Getenv("PROBE_INTERVAL"); intervalStr != "" {
+		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
+			probeInterval = d
+		} else {
+			log.Warnf("Invalid PROBE_INTERVAL '%s', using default 5m", intervalStr)
+		}
+	}
+
+	probeConfig := collectors.ProbeConfig{
+		ObjStoreFQDN:   objStoreFQDN,
+		HostMountsPath: hostMountsPath,
+		ProbeInterval:  probeInterval,
+		MaxJitter:      30 * time.Second,
+	}
+	probeCollector := collectors.NewProbeCollector(probeConfig)
+	registry.MustRegister(probeCollector)
+	defer probeCollector.Close()
+	log.Infof("Health probe collector enabled (objstore_fqdn: %q, mounts: %s)", objStoreFQDN, hostMountsPath)
+
+	// Register shared DNS failure counter
+	registry.MustRegister(collectors.DNSResolveFailures)
 
 	http.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -160,4 +207,26 @@ func main() {
 
 	log.Infof("Starting metrics exporter on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+// resolveObjStoreFQDN resolves an FQDN to its IPv4 addresses via DNS.
+// It returns an error if the hostname cannot be resolved or yields no IPv4 addresses.
+func resolveObjStoreFQDN(fqdn string) ([]string, error) {
+	ips, err := net.LookupIP(fqdn)
+	if err != nil {
+		return nil, fmt.Errorf("DNS lookup failed for %s: %w", fqdn, err)
+	}
+
+	var ipv4s []string
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			ipv4s = append(ipv4s, v4.String())
+		}
+	}
+
+	if len(ipv4s) == 0 {
+		return nil, fmt.Errorf("no IPv4 addresses found for %s", fqdn)
+	}
+
+	return ipv4s, nil
 }

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Copyright (c) 2025 Crusoe Energy */
 //
-// Object store latency probe.  Measures the real elapsed time between an
-// outbound tcp_sendmsg and the next inbound tcp_recvmsg on the *same*
-// socket, provided the socket's destination IP is present in the
+// Object store connection-level probe.  Measures aggregate bytes,
+// retransmits, and connection-phase latency between an outbound
+// tcp_sendmsg and the next inbound tcp_recvmsg on the *same* socket,
+// provided the socket's destination IP is present in the
 // objstore_server_ips map AND the destination port matches the configured
-// target port (typically 80 or 443).
+// target port (typically 443).  Does NOT classify individual HTTP
+// requests (impossible with TLS/HTTP2); a separate proxy-based
+// measurement is used for per-request GET/PUT latency.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -20,27 +23,17 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 // Structures
 // -----------------------------------------------------------------------
 
-// Configuration structure expected by Go collector
+// Configuration structure expected by Go collector.
+// Supports up to 4 target ports (e.g. 80 and 443).  Unused slots are 0.
+#define MAX_TARGET_PORTS 4
 struct config {
-    __u16 target_port;  // network byte order
-    __u16 padding;
+    __u16 target_ports[MAX_TARGET_PORTS];  // host byte order; 0 = unused
 };
 
-// Request classification by TCP byte-ratio.
-// Works for both HTTP and HTTPS since it does not inspect payload.
-#define METHOD_OTHER   0
-#define METHOD_GET     1
-#define METHOD_PUT     2
-
-// Byte threshold: a request must send or receive more than this many
-// bytes to be classified as PUT or GET.  Below this, it is OTHER
-// (HEAD, DELETE, LIST, small objects, etc.).
-#define CLASSIFY_MIN_BYTES  4096
-
-// Composite key for per-IP, per-method stats.
+// Per-IP stats key (no per-method breakdown — TLS hides HTTP semantics).
 struct stats_key {
     __u32 dest_ip;
-    __u32 method;   // METHOD_*
+    __u32 _pad;
 };
 
 // Track in-flight requests per socket.
@@ -70,7 +63,7 @@ struct latency_stats {
 // Maps
 // -----------------------------------------------------------------------
 
-// Config map -- Go collector writes the target port here.
+// Config map -- Go collector writes the target ports here.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -105,6 +98,25 @@ struct {
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
+
+// Check whether dest_port matches one of the configured target ports.
+// dest_port is in network byte order (as read from skc_dport).
+static __always_inline bool is_target_port(__u16 dest_port)
+{
+    __u32 cfg_key = 0;
+    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (!cfg)
+        return true;  // no config = accept all ports
+
+    for (int i = 0; i < MAX_TARGET_PORTS; i++) {
+        __u16 p = cfg->target_ports[i];
+        if (p == 0)
+            break;
+        if (dest_port == bpf_htons(p))
+            return true;
+    }
+    return false;
+}
 
 // Check whether dest_ip is one of the known object store server IPs.
 static __always_inline bool is_objstore_server(__u32 dest_ip)
@@ -155,21 +167,28 @@ static __always_inline void update_objstore_histogram(__u64 *histogram,
         __sync_fetch_and_add(&histogram[bucket], 1);
 }
 
-// Classify a completed request as GET, PUT, or OTHER based on the
-// ratio of bytes sent vs bytes received.
-static __always_inline __u32 classify_method(__u64 bytes_sent, __u64 bytes_recv)
+// get_or_create_stats looks up (or creates) the per-IP stats entry.
+static __always_inline struct latency_stats *get_or_create_stats(__u32 dest_ip)
 {
-    if (bytes_sent > CLASSIFY_MIN_BYTES && bytes_sent > 4 * bytes_recv)
-        return METHOD_PUT;
-    if (bytes_recv > CLASSIFY_MIN_BYTES && bytes_recv > 4 * bytes_sent)
-        return METHOD_GET;
-    return METHOD_OTHER;
+    struct stats_key skey = {};
+    skey.dest_ip = dest_ip;
+
+    struct latency_stats *stats =
+        bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
+    if (stats)
+        return stats;
+
+    // Create a zero-initialized entry.
+    struct latency_stats new_stats = {};
+    bpf_map_update_elem(&objstore_latency_by_ip, &skey, &new_stats, BPF_NOEXIST);
+    return bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
 }
 
-// Finalize a completed request: classify by byte ratio, then record all
-// metrics (request count, latency, bytes, histogram) into the appropriate
-// per-method stats bucket.  Called from tcp_sendmsg when it detects a
-// previous request on the same socket, or could be called on socket close.
+// Finalize a completed connection phase: record latency, request count,
+// and retransmits into the per-IP stats bucket.  Called from tcp_sendmsg
+// when it detects a previous request on the same socket.
+// Note: bytes_sent and bytes_recv are accumulated in real-time (on every
+// send/recv), NOT here, to avoid undercounting on long-lived connections.
 static __always_inline void finalize_request(struct active_request *req)
 {
     // Must have received something to be a completed request
@@ -177,32 +196,13 @@ static __always_inline void finalize_request(struct active_request *req)
         return;
 
     __u64 latency_ns = req->recv_time_ns - req->send_time_ns;
-    __u32 method = classify_method(req->total_bytes_sent,
-                                   req->total_bytes_recv);
 
-    struct stats_key skey = {};
-    skey.dest_ip = req->dest_ip;
-    skey.method  = method;
-
-    struct latency_stats *stats =
-        bpf_map_lookup_elem(&objstore_latency_by_ip, &skey);
+    struct latency_stats *stats = get_or_create_stats(req->dest_ip);
     if (stats) {
         __sync_fetch_and_add(&stats->request_count, 1);
         __sync_fetch_and_add(&stats->total_latency_ns, latency_ns);
-        __sync_fetch_and_add(&stats->bytes_sent, req->total_bytes_sent);
-        __sync_fetch_and_add(&stats->bytes_recv, req->total_bytes_recv);
         __sync_fetch_and_add(&stats->retransmit_count, req->retransmit_count);
         update_objstore_histogram(stats->histogram, latency_ns);
-    } else {
-        struct latency_stats new_stats = {};
-        new_stats.request_count = 1;
-        new_stats.total_latency_ns = latency_ns;
-        new_stats.bytes_sent = req->total_bytes_sent;
-        new_stats.bytes_recv = req->total_bytes_recv;
-        new_stats.retransmit_count = req->retransmit_count;
-        update_objstore_histogram(new_stats.histogram, latency_ns);
-        bpf_map_update_elem(&objstore_latency_by_ip, &skey,
-                            &new_stats, BPF_NOEXIST);
     }
 }
 
@@ -230,21 +230,19 @@ int tcp_sendmsg_entry(struct pt_regs *ctx)
     __u32 dest_ip   = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     __u16 dest_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
 
-    // Check target port from config (port is in network byte order)
-    __u32 cfg_key = 0;
-    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (cfg) {
-        __u16 target_port_net = bpf_htons(cfg->target_port);
-        if (dest_port != target_port_net)
-            return 0;
-    }
-
-    // Check if this destination is a known object store server
+    // Check target port and destination IP
+    if (!is_target_port(dest_port))
+        return 0;
     if (!is_objstore_server(dest_ip))
         return 0;
 
     __u64 size = (__u64)PT_REGS_PARM3(ctx);
     __u64 sk_key = (__u64)sk;
+
+    // Always accumulate bytes_sent into the stats map immediately.
+    struct latency_stats *stats = get_or_create_stats(dest_ip);
+    if (stats)
+        __sync_fetch_and_add(&stats->bytes_sent, size);
 
     // Look up existing active_request for this socket.
     struct active_request *existing =
@@ -302,39 +300,35 @@ int tcp_cleanup_rbuf_entry(struct pt_regs *ctx)
     __u32 dest_ip   = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     __u16 dest_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
 
-    __u32 cfg_key = 0;
-    struct config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (cfg) {
-        __u16 target_port_net = bpf_htons(cfg->target_port);
-        if (dest_port != target_port_net)
-            return 0;
-    }
-
+    // Check target port and destination IP
+    if (!is_target_port(dest_port))
+        return 0;
     if (!is_objstore_server(dest_ip))
         return 0;
 
-    // Look up the active request for this socket and accumulate recv bytes.
-    // We do NOT finalize here -- that happens on the next tcp_sendmsg,
-    // which signals the start of a new HTTP request.
+    // Always accumulate bytes_recv into the per-IP stats map, even if
+    // there is no active_request for this socket (e.g. socket predates
+    // probe load, or active_request was evicted).
+    struct latency_stats *stats = get_or_create_stats(dest_ip);
+    if (stats)
+        __sync_fetch_and_add(&stats->bytes_recv, (__u64)copied);
+
+    // If there is an active_request, also update it for latency tracking.
     __u64 sk_key = (__u64)sk;
     struct active_request *req =
         bpf_map_lookup_elem(&active_requests, &sk_key);
-    if (!req)
-        return 0;
-
-    __sync_fetch_and_add(&req->total_bytes_recv, (__u64)copied);
-    // Always update recv_time_ns to the latest receive timestamp.
-    // Use a direct write (not atomic) since only one CPU handles
-    // a given socket's receive path at a time.
-    req->recv_time_ns = bpf_ktime_get_ns();
+    if (req) {
+        __sync_fetch_and_add(&req->total_bytes_recv, (__u64)copied);
+        // Always update recv_time_ns to the latest receive timestamp.
+        req->recv_time_ns = bpf_ktime_get_ns();
+    }
     return 0;
 }
 
 // tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 //
 // Fires on every TCP retransmission.  We accumulate retransmits in the
-// active request so they get attributed to the correct operation
-// (PUT/GET/OTHER) when the request is finalized.
+// active request so they get recorded when the request is finalized.
 SEC("kprobe/tcp_retransmit_skb")
 int tcp_retransmit_entry(struct pt_regs *ctx)
 {

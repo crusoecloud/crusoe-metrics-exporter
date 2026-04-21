@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -17,6 +18,14 @@ import (
 
 //go:embed ebpf/objstore_latency.o
 var objstoreLatencyBPF []byte
+
+// ObjStoreConfig holds configuration for object store latency monitoring
+type ObjStoreConfig struct {
+	InitialIPs      []string      // Initial object store endpoint IPs
+	FQDN            string        // FQDN for periodic DNS re-resolution
+	TargetPorts     []uint16      // Ports to monitor (default: [443, 80])
+	RefreshInterval time.Duration // How often to re-resolve FQDN (default 5m)
+}
 
 // ObjStoreLatencyCollector monitors object store request latency using eBPF kprobes
 type ObjStoreLatencyCollector struct {
@@ -34,55 +43,66 @@ type ObjStoreLatencyCollector struct {
 	endpointMutex     sync.RWMutex
 	filterIPs         []string     // IP filter strings (for testing)
 	filterNets        []*net.IPNet // Parsed CIDR networks (for testing)
+	config            ObjStoreConfig
+	lastFQDNRefresh   time.Time
+	refreshMutex      sync.RWMutex
 }
 
 // NewObjStoreLatencyCollector creates a new object store latency collector
-// filterIPs: optional list of object store endpoint IPs or hostnames to monitor
-// targetPort: port to monitor (e.g., 443 for HTTPS, 8080 for HTTP)
-func NewObjStoreLatencyCollector(filterIPs []string, targetPort uint16) (*ObjStoreLatencyCollector, error) {
+func NewObjStoreLatencyCollector(config ObjStoreConfig) (*ObjStoreLatencyCollector, error) {
+	// Set defaults
+	if len(config.TargetPorts) == 0 {
+		config.TargetPorts = []uint16{443, 80}
+	}
+	if config.RefreshInterval == 0 {
+		config.RefreshInterval = 5 * time.Minute
+	}
+
 	c := &ObjStoreLatencyCollector{
 		latencyDesc: prometheus.NewDesc(
-			MetricPrefix+"objectstore_latency_seconds",
-			"Object store request latency in seconds",
-			[]string{"endpoint", "operation"},
+			MetricPrefix+"objectstore_connection_latency_seconds",
+			"Object store connection-phase latency in seconds (send-to-recv on same socket)",
+			[]string{"endpoint"},
 			nil,
 		),
 		requestsDesc: prometheus.NewDesc(
-			MetricPrefix+"objectstore_requests_total",
-			"Total number of object store requests",
-			[]string{"endpoint", "operation"},
+			MetricPrefix+"objectstore_connections_total",
+			"Total number of object store connection phases observed",
+			[]string{"endpoint"},
 			nil,
 		),
 		retransmitDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_tcp_retransmits_total",
 			"Total number of TCP retransmissions to object store servers",
-			[]string{"endpoint", "operation"},
+			[]string{"endpoint"},
 			nil,
 		),
 		bytesSentDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_bytes_sent_total",
 			"Total bytes sent to object store servers",
-			[]string{"endpoint", "operation"},
+			[]string{"endpoint"},
 			nil,
 		),
 		bytesRecvDesc: prometheus.NewDesc(
 			MetricPrefix+"objectstore_bytes_recv_total",
 			"Total bytes received from object store servers",
-			[]string{"endpoint", "operation"},
+			[]string{"endpoint"},
 			nil,
 		),
 		latencyHistDesc: prometheus.NewDesc(
-			MetricPrefix+"objectstore_latency_histogram_seconds",
-			"Histogram of object store request latency in seconds",
-			[]string{"endpoint", "operation"},
+			MetricPrefix+"objectstore_connection_latency_histogram_seconds",
+			"Histogram of object store connection-phase latency in seconds",
+			[]string{"endpoint"},
 			nil,
 		),
 		objStoreEndpoints: make(map[uint32]bool),
-		filterIPs:         filterIPs,
+		filterIPs:         config.InitialIPs,
+		config:            config,
+		lastFQDNRefresh:   time.Now(),
 	}
 
 	// Parse filter IPs if provided
-	if len(filterIPs) > 0 {
+	if len(config.InitialIPs) > 0 {
 		if err := c.parseIPFilters(); err != nil {
 			return nil, fmt.Errorf("failed to parse IP filters: %w", err)
 		}
@@ -98,10 +118,10 @@ func NewObjStoreLatencyCollector(filterIPs []string, targetPort uint16) (*ObjSto
 		return nil, fmt.Errorf("failed to load eBPF program: %w", err)
 	}
 
-	// Configure target port in eBPF program
-	if err := c.configurePort(targetPort); err != nil {
+	// Configure target ports in eBPF program
+	if err := c.configurePorts(config.TargetPorts); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("failed to configure port: %w", err)
+		return nil, fmt.Errorf("failed to configure ports: %w", err)
 	}
 
 	// Attach kprobes
@@ -116,14 +136,14 @@ func NewObjStoreLatencyCollector(filterIPs []string, targetPort uint16) (*ObjSto
 	}
 
 	// Add object store endpoint IPs from filter list
-	for _, ipOrHost := range filterIPs {
+	for _, ipOrHost := range config.InitialIPs {
 		if err := c.addObjStoreEndpoint(ipOrHost); err != nil {
 			log.Warnf("failed to add object store endpoint %s: %v", ipOrHost, err)
 		}
 	}
 
 	// If no filters provided, use default S3 endpoint (AWS S3)
-	if len(filterIPs) == 0 {
+	if len(config.InitialIPs) == 0 {
 		if err := c.addObjStoreEndpoint("s3.amazonaws.com"); err != nil {
 			log.Warnf("failed to resolve s3.amazonaws.com: %v", err)
 		}
@@ -148,38 +168,35 @@ func (c *ObjStoreLatencyCollector) loadBPF() error {
 	return nil
 }
 
-// configurePort sets the target port in the eBPF config map
-func (c *ObjStoreLatencyCollector) configurePort(port uint16) error {
+// configurePorts sets the target ports in the eBPF config map.
+// Up to 4 ports are supported; unused slots are zeroed.
+func (c *ObjStoreLatencyCollector) configurePorts(ports []uint16) error {
 	configMap := c.objs.Maps["config_map"]
 	if configMap == nil {
 		return fmt.Errorf("config_map not found in eBPF collection")
 	}
 
-	// Config structure matching the C struct
-	config := struct {
-		TargetPort uint16
-		Padding    uint16
-	}{
-		TargetPort: port,
-		Padding:    0,
+	// Config structure matching the C struct (MAX_TARGET_PORTS = 4)
+	var config struct {
+		TargetPorts [4]uint16
+	}
+	for i := 0; i < len(ports) && i < 4; i++ {
+		config.TargetPorts[i] = ports[i]
 	}
 
-	// Key is always 0 for the single config entry
 	var key uint32 = 0
-
 	if err := configMap.Put(&key, &config); err != nil {
 		return fmt.Errorf("failed to set port config: %w", err)
 	}
 
 	// Verify the config was written correctly
 	var readConfig struct {
-		TargetPort uint16
-		Padding    uint16
+		TargetPorts [4]uint16
 	}
 	if err := configMap.Lookup(&key, &readConfig); err != nil {
 		log.Warnf("failed to verify config was written: %v", err)
 	} else {
-		log.Infof("Configured eBPF to track port %d (verified: config map contains port=%d)", port, readConfig.TargetPort)
+		log.Infof("Configured eBPF to track ports %v (verified: config map contains %v)", ports, readConfig.TargetPorts)
 	}
 
 	return nil
@@ -301,8 +318,75 @@ func (c *ObjStoreLatencyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.latencyHistDesc
 }
 
+// refreshFQDNIfNeeded re-resolves the configured FQDN and updates both the
+// in-memory endpoint set and the eBPF server IPs map. Uses double-checked
+// locking to avoid redundant work (same pattern as NFS refreshMountsIfNeeded).
+func (c *ObjStoreLatencyCollector) refreshFQDNIfNeeded() {
+	if c.config.FQDN == "" {
+		return
+	}
+
+	c.refreshMutex.RLock()
+	needsRefresh := time.Since(c.lastFQDNRefresh) > c.config.RefreshInterval
+	c.refreshMutex.RUnlock()
+
+	if !needsRefresh {
+		return
+	}
+
+	c.refreshMutex.Lock()
+	defer c.refreshMutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if time.Since(c.lastFQDNRefresh) <= c.config.RefreshInterval {
+		return
+	}
+
+	ips, err := net.LookupIP(c.config.FQDN)
+	if err != nil {
+		log.Warnf("failed to re-resolve FQDN %s: %v", c.config.FQDN, err)
+		DNSResolveFailures.WithLabelValues("objectstore").Inc()
+		c.lastFQDNRefresh = time.Now()
+		return
+	}
+
+	// Build new endpoint set
+	newEndpoints := make(map[uint32]bool)
+	var newFilterIPs []string
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ipInt := binary.LittleEndian.Uint32(ipv4)
+			newEndpoints[ipInt] = true
+			newFilterIPs = append(newFilterIPs, ipv4.String())
+		}
+	}
+
+	if len(newEndpoints) == 0 {
+		log.Warnf("FQDN %s re-resolved to 0 IPv4 addresses, keeping previous IPs", c.config.FQDN)
+		c.lastFQDNRefresh = time.Now()
+		return
+	}
+
+	// Swap in-memory endpoint map
+	c.endpointMutex.Lock()
+	c.objStoreEndpoints = newEndpoints
+	c.filterIPs = newFilterIPs
+	c.endpointMutex.Unlock()
+
+	// Update eBPF map
+	if err := c.updateObjStoreServerIPsMap(); err != nil {
+		log.Warnf("failed to update eBPF map after FQDN re-resolution: %v", err)
+	}
+
+	c.lastFQDNRefresh = time.Now()
+	log.Infof("Re-resolved FQDN %s to %d IPs: %v", c.config.FQDN, len(newFilterIPs), newFilterIPs)
+}
+
 // Collect implements prometheus.Collector
 func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
+	// Periodically re-resolve FQDN for new IPs
+	c.refreshFQDNIfNeeded()
+
 	// Get the objstore_latency_by_ip map from the eBPF collection
 	latencyMap := c.objs.Maps["objstore_latency_by_ip"]
 	if latencyMap == nil {
@@ -312,8 +396,8 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Iterate over all entries in the map
 	var key struct {
-		DstIP  uint32
-		Method uint32
+		DstIP uint32
+		Pad   uint32
 	}
 	var value struct {
 		RequestCount    uint64
@@ -340,7 +424,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 		// Convert IP to string for the label
 		ipStr := ipUint32ToString(key.DstIP)
-		operation := httpMethodToString(key.Method)
 
 		// Convert nanoseconds to seconds (Prometheus standard)
 		latencySeconds := float64(value.TotalLatency) / 1e9
@@ -351,7 +434,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.RequestCount),
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -359,7 +441,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			latencySeconds,
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -367,7 +448,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.RetransmitCount),
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -375,7 +455,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.BytesSent),
 			ipStr,
-			operation,
 		)
 
 		ch <- prometheus.MustNewConstMetric(
@@ -383,7 +462,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(value.BytesRecv),
 			ipStr,
-			operation,
 		)
 
 		histBuckets, histCount, histSum := histogramToBuckets(value.Histogram, objstoreHistogramBucketBoundaries)
@@ -393,7 +471,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			histSum,
 			histBuckets,
 			ipStr,
-			operation,
 		)
 	}
 
@@ -403,21 +480,6 @@ func (c *ObjStoreLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 	log.Debugf("Object store metrics collection: %d total entries, %d filtered out, %d emitted",
 		totalEntries, filteredEntries, totalEntries-filteredEntries)
-}
-
-// httpMethodToString maps eBPF METHOD_* constants to Prometheus label strings.
-// Must match the #define values in ebpf/objstore_latency.c:
-//
-//	METHOD_OTHER=0, METHOD_GET=1, METHOD_PUT=2
-func httpMethodToString(method uint32) string {
-	switch method {
-	case 1:
-		return "GET"
-	case 2:
-		return "PUT"
-	default:
-		return "OTHER"
-	}
 }
 
 // matchesTargetIP checks if an IP matches any configured object store endpoint
@@ -549,6 +611,12 @@ func (c *ObjStoreLatencyCollector) updateObjStoreServerIPsMap() error {
 		index++
 	}
 
-	log.Infof("Updated eBPF object store server IPs map with %d real object store server IPs", index)
+	// Zero out remaining slots so the eBPF is_objstore_server() loop stops
+	var zero uint32
+	for i := index; i < 64; i++ {
+		_ = serverIPsMap.Update(&i, &zero, ebpf.UpdateAny)
+	}
+
+	log.Infof("Updated eBPF object store server IPs map with %d IPs (cleared %d stale slots)", index, 64-index)
 	return nil
 }

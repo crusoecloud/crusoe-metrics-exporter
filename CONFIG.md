@@ -93,37 +93,46 @@ env:
 
 ---
 
-## Object Store Latency Collector
+## Object Store Connection Collector
 
-Measures HTTP request latency to object store endpoints by probing `tcp_sendmsg` / `tcp_recvmsg` and filtering on destination IP + port.
+Measures connection-level latency, byte throughput, and TCP retransmissions to object store endpoints by probing `tcp_sendmsg` / `tcp_cleanup_rbuf` / `tcp_retransmit_skb` and filtering on destination IP + port.
+
+> **Note:** With TLS/HTTP2, per-request GET/PUT classification is not possible from the TCP layer. These metrics report aggregate connection-phase statistics per endpoint. Per-request latency should be measured via a proxy-based approach.
 
 ### Environment Variables
 
-| Variable                | Default | Description |
-|-------------------------|---------|-------------|
-| `OBJSTORE_ENDPOINT_IPS` | (none)  | Comma-separated object store server IPs. **Required** -- the collector is skipped if this is empty. |
-| `OBJSTORE_ENDPOINT_PORT`| `443`   | Destination port to filter on |
+| Variable                 | Default | Description |
+|--------------------------|---------|-------------|
+| `OBJSTORE_ENDPOINT_FQDN` | (none)  | Object store endpoint FQDN (e.g. `object.eu-iceland1-a.crusoecloudcompute.com`). Resolved via DNS at startup to up to 16 IPv4 addresses. **Preferred** -- takes precedence over `OBJSTORE_ENDPOINT_IPS`. |
+| `OBJSTORE_ENDPOINT_IPS`  | (none)  | Comma-separated object store server IPs. Legacy fallback -- ignored when `OBJSTORE_ENDPOINT_FQDN` is set. The collector is skipped if neither variable yields IPs. |
+| `OBJSTORE_ENDPOINT_PORT` | `443`   | Destination port to filter on |
 
 ### Metrics
 
-All metrics are labeled by `endpoint` and `operation`.
+All metrics are labeled by `endpoint`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `crusoe_vm_objectstore_latency_seconds` | counter | Cumulative request latency in seconds |
-| `crusoe_vm_objectstore_requests_total` | counter | Total requests |
-| `crusoe_vm_objectstore_latency_p50_seconds` | gauge | 50th percentile latency |
-| `crusoe_vm_objectstore_latency_p90_seconds` | gauge | 90th percentile latency |
-| `crusoe_vm_objectstore_latency_p99_seconds` | gauge | 99th percentile latency |
+| `crusoe_vm_objectstore_connection_latency_seconds` | counter | Cumulative connection-phase latency in seconds |
+| `crusoe_vm_objectstore_connections_total` | counter | Total connection phases observed |
+| `crusoe_vm_objectstore_tcp_retransmits_total` | counter | TCP retransmissions to object store |
+| `crusoe_vm_objectstore_bytes_sent_total` | counter | Total bytes sent to object store |
+| `crusoe_vm_objectstore_bytes_recv_total` | counter | Total bytes received from object store |
+| `crusoe_vm_objectstore_connection_latency_histogram_seconds` | histogram | Connection-phase latency histogram (20 geometric buckets, 1ms--1000ms) |
 
 ### Example Configuration
 
 ```yaml
 env:
-- name: OBJSTORE_ENDPOINT_IPS
-  value: "100.63.0.10,10.234.1.180,10.234.1.132"
+# Preferred: use FQDN (resolved via DNS at startup)
+- name: OBJSTORE_ENDPOINT_FQDN
+  value: "object.eu-iceland1-a.crusoecloudcompute.com"
 - name: OBJSTORE_ENDPOINT_PORT
-  value: "8080"
+  value: "443"
+
+# Legacy fallback: explicit IPs (ignored when OBJSTORE_ENDPOINT_FQDN is set)
+# - name: OBJSTORE_ENDPOINT_IPS
+#   value: "100.63.0.10,10.234.1.180,10.234.1.132"
 ```
 
 ---
@@ -136,10 +145,10 @@ Minimal daemonset env block with all three collectors:
 env:
 - name: HOST_PROC_PATH
   value: /host/proc
+- name: OBJSTORE_ENDPOINT_FQDN
+  value: "object.eu-iceland1-a.crusoecloudcompute.com"
 - name: OBJSTORE_ENDPOINT_PORT
-  value: "8080"
-- name: OBJSTORE_ENDPOINT_IPS
-  value: "100.63.0.10,10.234.1.180,10.234.1.132"
+  value: "443"
 ```
 
 The container requires:

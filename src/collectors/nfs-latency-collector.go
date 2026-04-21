@@ -61,7 +61,7 @@ func NewNFSLatencyCollector(config NFSConfig) (*NFSLatencyCollector, error) {
 		config.Protocols = []string{"tcp"}
 	}
 	if config.MountRefreshInterval == 0 {
-		config.MountRefreshInterval = 30 * time.Second
+		config.MountRefreshInterval = 5 * time.Minute
 	}
 	if config.HostMountsPath == "" {
 		config.HostMountsPath = "/proc/mounts"
@@ -281,16 +281,18 @@ func (c *NFSLatencyCollector) resolveDomainName(domainName string) []string {
 
 	// Try to resolve the domain name
 	addrs, err := net.LookupHost(domainName)
-	if err == nil {
-		for _, addr := range addrs {
-			// Validate that it's an IP address
-			if ip := net.ParseIP(addr); ip != nil {
-				ips = append(ips, addr)
-			}
+	if err != nil {
+		DNSResolveFailures.WithLabelValues("nfs").Inc()
+		return ips
+	}
+
+	for _, addr := range addrs {
+		// Validate that it's an IP address
+		if ip := net.ParseIP(addr); ip != nil {
+			ips = append(ips, addr)
 		}
 	}
 
-	// If DNS resolution failed or returned no IPs, return empty slice
 	return ips
 }
 
