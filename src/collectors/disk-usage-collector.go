@@ -15,7 +15,9 @@ type DiskUsageCollector struct {
 	mountsPath       string
 	hostRootPath     string
 	bytesUsed        *prometheus.Desc
+	bytesTotal       *prometheus.Desc
 	inodesUsed       *prometheus.Desc
+	inodesTotal      *prometheus.Desc
 	collectionErrors *prometheus.Desc
 }
 
@@ -29,9 +31,21 @@ func NewDiskUsageCollector(mountsPath, hostRootPath string) *DiskUsageCollector 
 			[]string{"device", "mount_point"},
 			nil,
 		),
+		bytesTotal: prometheus.NewDesc(
+			MetricPrefix+"disk_bytes_total",
+			"Total bytes on disk filesystem",
+			[]string{"device", "mount_point"},
+			nil,
+		),
 		inodesUsed: prometheus.NewDesc(
 			MetricPrefix+"disk_inodes_used",
 			"Inodes currently used on disk filesystem",
+			[]string{"device", "mount_point"},
+			nil,
+		),
+		inodesTotal: prometheus.NewDesc(
+			MetricPrefix+"disk_inodes_total",
+			"Total inodes on disk filesystem",
 			[]string{"device", "mount_point"},
 			nil,
 		),
@@ -46,7 +60,9 @@ func NewDiskUsageCollector(mountsPath, hostRootPath string) *DiskUsageCollector 
 
 func (c *DiskUsageCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.bytesUsed
+	ch <- c.bytesTotal
 	ch <- c.inodesUsed
+	ch <- c.inodesTotal
 	ch <- c.collectionErrors
 }
 
@@ -96,10 +112,14 @@ func (c *DiskUsageCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		bytesUsed := float64(stat.Blocks-stat.Bfree) * float64(stat.Bsize)
+		bytesTotal := float64(stat.Blocks) * float64(stat.Bsize)
 		inodesUsed := float64(stat.Files - stat.Ffree)
+		inodesTotal := float64(stat.Files)
 
 		ch <- prometheus.MustNewConstMetric(c.bytesUsed, prometheus.GaugeValue, bytesUsed, deviceName, mountPoint)
+		ch <- prometheus.MustNewConstMetric(c.bytesTotal, prometheus.GaugeValue, bytesTotal, deviceName, mountPoint)
 		ch <- prometheus.MustNewConstMetric(c.inodesUsed, prometheus.GaugeValue, inodesUsed, deviceName, mountPoint)
+		ch <- prometheus.MustNewConstMetric(c.inodesTotal, prometheus.GaugeValue, inodesTotal, deviceName, mountPoint)
 	}
 
 	if err := scanner.Err(); err != nil {

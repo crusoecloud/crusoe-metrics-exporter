@@ -54,7 +54,9 @@ All metrics are labeled by `device` (e.g., `vda1`, `vdb1`) and `mount_point` (e.
 | Metric | Type | Description |
 |--------|------|-------------|
 | `crusoe_vm_disk_bytes_used` | gauge | Bytes currently used on disk filesystem |
+| `crusoe_vm_disk_bytes_total` | gauge | Total bytes on disk filesystem |
 | `crusoe_vm_disk_inodes_used` | gauge | Inodes currently used on disk filesystem |
+| `crusoe_vm_disk_inodes_total` | gauge | Total inodes on disk filesystem |
 | `crusoe_vm_disk_usage_collection_errors_total` | counter | Collection errors |
 
 ---
