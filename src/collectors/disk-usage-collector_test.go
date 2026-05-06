@@ -78,9 +78,9 @@ func TestDiskUsageCollector_DeduplicatesDevices(t *testing.T) {
 	c := NewDiskUsageCollector(mountsPath, "")
 	metrics := collectDiskUsageMetrics(t, c)
 
-	// Should be exactly 3: bytes_used, inodes_used, collection_errors
-	if len(metrics) != 3 {
-		t.Errorf("Expected 3 metrics (bytes_used + inodes_used + errors), got %d", len(metrics))
+	// Should be exactly 5: bytes_used, bytes_total, inodes_used, inodes_total, collection_errors
+	if len(metrics) != 5 {
+		t.Errorf("Expected 5 metrics (bytes_used + bytes_total + inodes_used + inodes_total + errors), got %d", len(metrics))
 	}
 }
 
@@ -96,28 +96,41 @@ func TestDiskUsageCollector_StatfsOnRealPath(t *testing.T) {
 	c := NewDiskUsageCollector(mountsPath, "")
 	metrics := collectDiskUsageMetrics(t, c)
 
-	// Expect exactly 3 metrics: bytes_used, inodes_used, collection_errors
-	if len(metrics) != 3 {
-		t.Errorf("Expected 3 metrics, got %d", len(metrics))
+	// Expect exactly 5 metrics: bytes_used, bytes_total, inodes_used, inodes_total, collection_errors
+	if len(metrics) != 5 {
+		t.Errorf("Expected 5 metrics, got %d", len(metrics))
 	}
 
-	// Verify we got a bytes_used and inodes_used metric
-	foundBytes := false
-	foundInodes := false
+	foundBytesUsed := false
+	foundBytesTotal := false
+	foundInodesUsed := false
+	foundInodesTotal := false
 	for _, m := range metrics {
 		desc := descString(m)
 		if strings.Contains(desc, "bytes_used") {
-			foundBytes = true
+			foundBytesUsed = true
+		}
+		if strings.Contains(desc, "bytes_total") {
+			foundBytesTotal = true
 		}
 		if strings.Contains(desc, "inodes_used") {
-			foundInodes = true
+			foundInodesUsed = true
+		}
+		if strings.Contains(desc, "inodes_total") {
+			foundInodesTotal = true
 		}
 	}
-	if !foundBytes {
+	if !foundBytesUsed {
 		t.Error("Expected crusoe_vm_disk_bytes_used metric but did not find it")
 	}
-	if !foundInodes {
+	if !foundBytesTotal {
+		t.Error("Expected crusoe_vm_disk_bytes_total metric but did not find it")
+	}
+	if !foundInodesUsed {
 		t.Error("Expected crusoe_vm_disk_inodes_used metric but did not find it")
+	}
+	if !foundInodesTotal {
+		t.Error("Expected crusoe_vm_disk_inodes_total metric but did not find it")
 	}
 }
 
@@ -147,7 +160,7 @@ func TestDiskUsageCollector_Describe(t *testing.T) {
 		count++
 	}
 
-	if count != 3 {
-		t.Errorf("Expected 3 descriptors, got %d", count)
+	if count != 5 {
+		t.Errorf("Expected 5 descriptors, got %d", count)
 	}
 }
