@@ -148,6 +148,8 @@ func main() {
 				objStoreIPs = append(objStoreIPs, ip)
 			}
 		}
+	} else {
+		log.Warnf("Neither OBJSTORE_ENDPOINT_FQDN nor OBJSTORE_ENDPOINT_FQDN was set, skipping objectstore probes")
 	}
 
 	var objStorePorts []uint16
