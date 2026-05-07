@@ -123,6 +123,11 @@ func main() {
 	registry.MustRegister(nfsStatsCollector)
 	log.Infof("NFS stats collector enabled (mountstats: %s)", mountStatsPath)
 
+	// Disk usage collector (bytes used, inodes used per vd* device)
+	diskUsageCollector := collectors.NewDiskUsageCollector(hostMountsPath, hostProcPath+"/1/root")
+	registry.MustRegister(diskUsageCollector)
+	log.Infof("Disk usage collector enabled (mounts: %s)", hostMountsPath)
+
 	// Object store latency collector (eBPF-based)
 	objStoreIPs := []string{}
 	objStoreFQDN := ""

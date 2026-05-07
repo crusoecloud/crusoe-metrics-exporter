@@ -41,6 +41,26 @@ All metrics are labeled by `device` (e.g., `sda`, `nvme0n1`).
 
 ---
 
+## Disk Usage Collector
+
+Reports filesystem usage per `vd*` partition by reading `HOST_PROC_PATH/1/mounts` and calling `statfs` through `HOST_PROC_PATH/1/root`.
+
+**No configuration required.** Always enabled, no env vars needed.
+
+### Metrics
+
+All metrics are labeled by `device` (e.g., `vda1`, `vdb1`) and `mount_point` (e.g., `/`, `/boot`).
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `crusoe_vm_disk_bytes_used` | gauge | Bytes currently used on disk filesystem |
+| `crusoe_vm_disk_bytes_total` | gauge | Total bytes on disk filesystem |
+| `crusoe_vm_disk_inodes_used` | gauge | Inodes currently used on disk filesystem |
+| `crusoe_vm_disk_inodes_total` | gauge | Total inodes on disk filesystem |
+| `crusoe_vm_disk_usage_collection_errors_total` | counter | Collection errors |
+
+---
+
 ## NFS Latency Collector
 
 Measures NFS RPC round-trip latency by probing `tcp_sendmsg` / `tcp_recvmsg` and filtering on destination IP + port.

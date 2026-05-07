@@ -80,6 +80,20 @@ Measures per-device disk I/O latency using eBPF tracepoints (`block_rq_issue` / 
 | `crusoe_vm_disk_write_latency_seconds` | Histogram | `device` | Write latency histogram |
 | `crusoe_vm_disk_collection_errors_total` | Counter | - | Collection errors |
 
+### Disk Usage Collector
+
+**Source:** `src/collectors/disk-usage-collector.go`
+
+Reports filesystem usage per `vd*` partition by reading `HOST_PROC_PATH/1/mounts` and calling `statfs` through `HOST_PROC_PATH/1/root`.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_disk_bytes_used` | Gauge | `device`, `mount_point` | Bytes currently used on disk filesystem |
+| `crusoe_vm_disk_bytes_total` | Gauge | `device`, `mount_point` | Total bytes on disk filesystem |
+| `crusoe_vm_disk_inodes_used` | Gauge | `device`, `mount_point` | Inodes currently used on disk filesystem |
+| `crusoe_vm_disk_inodes_total` | Gauge | `device`, `mount_point` | Total inodes on disk filesystem |
+| `crusoe_vm_disk_usage_collection_errors_total` | Counter | - | Collection errors |
+
 ### Disk Stats Collector (procfs)
 
 **Source:** `src/collectors/disk-stats-collector.go`
