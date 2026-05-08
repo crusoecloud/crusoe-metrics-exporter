@@ -70,25 +70,36 @@ lint:
 
 VERSION_STRING := $(shell tr -d '[:space:]' < VERSION)
 
-# Build a release tarball for a single architecture. Mirrors the GitHub
-# Actions release workflow so it can be exercised locally before tagging.
-# Usage: make package-amd64  /  make package-arm64
-package-%:
-	@arch=$*; \
-	echo "Packaging crusoe-metrics-exporter $(VERSION_STRING) for linux/$$arch"; \
+# Build a release tarball. Mirrors the GitHub Actions release workflow
+# so it can be exercised locally before tagging.
+# Usage: make package-amd64  /  make package-arm64  /  make package
+define PACKAGE_RECIPE
+	set -eu; \
+	echo "Packaging crusoe-metrics-exporter $(VERSION_STRING) for linux/$(1)"; \
 	rm -rf src/collectors/ebpf/*.o; \
-	./ebpf/compile.sh --arch $$arch --outdir src/collectors/ebpf; \
-	stage="crusoe-metrics-exporter-$(VERSION_STRING)-linux-$$arch"; \
+	sh ./ebpf/compile.sh --arch $(1) --outdir src/collectors/ebpf; \
+	stage="crusoe-metrics-exporter-$(VERSION_STRING)-linux-$(1)"; \
 	rm -rf build/$$stage; \
 	mkdir -p build/$$stage; \
-	CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -a -installsuffix cgo \
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(1) go build -a -installsuffix cgo \
 		-ldflags "-s -w -X main.version=$(VERSION_STRING)" \
 		-o build/$$stage/crusoe-metrics-exporter ./src; \
 	cp systemd/crusoe-metrics-exporter.service build/$$stage/; \
 	cp LICENSE VERSION README.md build/$$stage/; \
 	tar -C build -czf build/$$stage.tar.gz $$stage; \
-	(cd build && shasum -a 256 $$stage.tar.gz > $$stage.tar.gz.sha256); \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		(cd build && sha256sum $$stage.tar.gz > $$stage.tar.gz.sha256); \
+	else \
+		(cd build && shasum -a 256 $$stage.tar.gz > $$stage.tar.gz.sha256); \
+	fi; \
 	echo "-> build/$$stage.tar.gz"
+endef
+
+package-amd64:
+	@$(call PACKAGE_RECIPE,amd64)
+
+package-arm64:
+	@$(call PACKAGE_RECIPE,arm64)
 
 package: package-amd64 package-arm64
 
