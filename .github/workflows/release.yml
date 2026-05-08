@@ -147,7 +147,7 @@ jobs:
         run: |
           mkdir -p src/collectors/ebpf
           # compile.sh emits <name>.o (no arch suffix) when a single --arch is given
-          ./ebpf/compile.sh --arch ${{ matrix.arch }} --outdir src/collectors/ebpf
+          sh ./ebpf/compile.sh --arch ${{ matrix.arch }} --outdir src/collectors/ebpf
 
       - name: Build Go binary for linux/${{ matrix.arch }}
         env:
