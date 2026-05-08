@@ -1,4 +1,4 @@
-.PHONY: build run docker-build docker-run clean test ebpf-compile ebpf-clean
+.PHONY: build run docker-build docker-run clean test ebpf-compile ebpf-clean package package-amd64 package-arm64
 
 APP_NAME=crusoe-metrics-exporter
 DOCKER_IMAGE=metrics-exporter:latest
@@ -68,14 +68,41 @@ fmt:
 lint:
 	golangci-lint run
 
+VERSION_STRING := $(shell tr -d '[:space:]' < VERSION)
+
+# Build a release tarball for a single architecture. Mirrors the GitHub
+# Actions release workflow so it can be exercised locally before tagging.
+# Usage: make package-amd64  /  make package-arm64
+package-%:
+	@arch=$*; \
+	echo "Packaging crusoe-metrics-exporter $(VERSION_STRING) for linux/$$arch"; \
+	rm -rf src/collectors/ebpf/*.o; \
+	./ebpf/compile.sh --arch $$arch --outdir src/collectors/ebpf; \
+	stage="crusoe-metrics-exporter-$(VERSION_STRING)-linux-$$arch"; \
+	rm -rf build/$$stage; \
+	mkdir -p build/$$stage; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -a -installsuffix cgo \
+		-ldflags "-s -w -X main.version=$(VERSION_STRING)" \
+		-o build/$$stage/crusoe-metrics-exporter ./src; \
+	cp systemd/crusoe-metrics-exporter.service build/$$stage/; \
+	cp LICENSE VERSION README.md build/$$stage/; \
+	tar -C build -czf build/$$stage.tar.gz $$stage; \
+	(cd build && shasum -a 256 $$stage.tar.gz > $$stage.tar.gz.sha256); \
+	echo "-> build/$$stage.tar.gz"
+
+package: package-amd64 package-arm64
+
 help:
 	@echo "Available targets:"
-	@echo "  build        - Build the Go binary"
-	@echo "  run          - Build and run locally"
-	@echo "  docker-build - Build Docker image"
-	@echo "  docker-run   - Build and run in Docker container"
-	@echo "  clean        - Remove binary and Docker image"
-	@echo "  test         - Run tests"
-	@echo "  deps         - Download and tidy dependencies"
-	@echo "  fmt          - Format Go code"
-	@echo "  lint         - Run linter"
+	@echo "  build           - Build the Go binary"
+	@echo "  run             - Build and run locally"
+	@echo "  docker-build    - Build Docker image"
+	@echo "  docker-run      - Build and run in Docker container"
+	@echo "  package         - Build release tarballs for amd64 and arm64"
+	@echo "  package-amd64   - Build release tarball for linux/amd64"
+	@echo "  package-arm64   - Build release tarball for linux/arm64"
+	@echo "  clean           - Remove binary and Docker image"
+	@echo "  test            - Run tests"
+	@echo "  deps            - Download and tidy dependencies"
+	@echo "  fmt             - Format Go code"
+	@echo "  lint            - Run linter"
