@@ -1,0 +1,34 @@
+[Unit]
+Description=Crusoe Metrics Exporter (eBPF-based host metrics)
+Documentation=https://github.com/crusoecloud/crusoe-metrics-exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crusoe-metrics-exporter
+
+# Configuration written by the crusoe-watch-agent installer.
+# Provides OBJSTORE_ENDPOINT_FQDN (region-derived) and other tunables.
+# The leading '-' makes it optional so the unit starts even if the file
+# is missing (e.g. when installed standalone for testing).
+EnvironmentFile=-/etc/crusoe/crusoe_watch_agent/.env
+
+# Native install: collectors read the host's /proc directly (no
+# /host/proc indirection like in the container image).
+Environment=HOST_PROC_PATH=/proc
+Environment=PORT=9500
+
+# eBPF programs require unlimited locked memory for maps.
+LimitMEMLOCK=infinity
+
+# Run as root: eBPF requires CAP_BPF/CAP_PERFMON (or CAP_SYS_ADMIN on
+# older kernels), and the NFS/diskstats collectors read /proc/<pid>
+# paths owned by other users.
+User=root
+
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
