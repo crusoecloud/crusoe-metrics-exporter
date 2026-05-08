@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     branches: ["main"]
+  # Allow manual re-runs (e.g. when a previous run was incomplete or the
+  # tag was created out-of-band, leaving the release without its tarballs).
+  workflow_dispatch:
 
 jobs:
   prepare:
@@ -13,6 +16,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       tag_exists: ${{ steps.check_tag.outputs.exists }}
+      # True when artifact jobs should run: either the tag is new, OR the
+      # release for an existing tag is missing one of the expected tarballs.
+      needs_artifacts: ${{ steps.check_assets.outputs.needs_artifacts }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -43,9 +49,42 @@ jobs:
           git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
           git push origin "v${{ steps.version.outputs.version }}"
 
+      - name: Decide whether to build artifacts
+        id: check_assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          if [[ "${{ steps.check_tag.outputs.exists }}" == "false" ]]; then
+            echo "Tag is new, building artifacts."
+            echo "needs_artifacts=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # Tag exists -- check whether the release has all expected tarballs.
+          expected=(
+            "crusoe-metrics-exporter-${VERSION}-linux-amd64.tar.gz"
+            "crusoe-metrics-exporter-${VERSION}-linux-arm64.tar.gz"
+          )
+          actual=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          missing=0
+          for asset in "${expected[@]}"; do
+            if ! grep -Fxq "$asset" <<<"$actual"; then
+              echo "Missing release asset: $asset"
+              missing=1
+            fi
+          done
+          if [[ $missing -eq 1 ]]; then
+            echo "needs_artifacts=true" >> $GITHUB_OUTPUT
+          else
+            echo "All expected release assets present, skipping rebuild."
+            echo "needs_artifacts=false" >> $GITHUB_OUTPUT
+          fi
+
   docker-image:
     needs: prepare
-    if: needs.prepare.outputs.tag_exists == 'false'
+    if: needs.prepare.outputs.needs_artifacts == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,7 +121,7 @@ jobs:
 
   binary-tarball:
     needs: prepare
-    if: needs.prepare.outputs.tag_exists == 'false'
+    if: needs.prepare.outputs.needs_artifacts == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -163,7 +202,7 @@ jobs:
 
   github-release:
     needs: [prepare, docker-image, binary-tarball]
-    if: needs.prepare.outputs.tag_exists == 'false'
+    if: needs.prepare.outputs.needs_artifacts == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
