@@ -128,6 +128,16 @@ func main() {
 	registry.MustRegister(diskUsageCollector)
 	log.Infof("Disk usage collector enabled (mounts: %s)", hostMountsPath)
 
+	// NVMe controller collector — passthrough drives only; one-shot probe at
+	// startup decides whether to register (no passthrough → silent skip).
+	nvmeCollector := collectors.NewNVMeCollector()
+	if ok, reason := nvmeCollector.Probe(); ok {
+		registry.MustRegister(nvmeCollector)
+		log.Infof("NVMe controller collector enabled")
+	} else {
+		log.Infof("NVMe controller collector disabled: %s", reason)
+	}
+
 	// Object store latency collector (eBPF-based)
 	objStoreIPs := []string{}
 	objStoreFQDN := ""
@@ -149,7 +159,7 @@ func main() {
 			}
 		}
 	} else {
-		log.Warnf("Neither OBJSTORE_ENDPOINT_FQDN nor OBJSTORE_ENDPOINT_FQDN was set, skipping objectstore probes")
+		log.Warnf("Neither OBJSTORE_ENDPOINT_FQDN nor OBJSTORE_ENDPOINT_IPS was set, skipping objectstore probes")
 	}
 
 	var objStorePorts []uint16

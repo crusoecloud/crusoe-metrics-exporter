@@ -157,6 +157,38 @@ env:
 
 ---
 
+## NVMe Controller Collector
+
+Reports controller identity and SMART health for PCIe-passthrough NVMe drives. Enabled only when at least one NVMe controller is visible under `/sys/class/nvme` **and** the device file `/dev/nvme0` is openable. On virtio-only VMs the collector is silently skipped; no metrics are registered.
+
+**No configuration required.** No environment variables. Enabled/disabled by a one-shot startup probe.
+
+### Deployment requirement
+
+The container must have access to `/dev/nvme*`. The default watch-agent compose file mounts `/sys` but not `/dev`. Add a bind mount to the compose file / Helm values before deploying:
+
+```yaml
+volumes:
+  - /dev/nvme0:/dev/nvme0   # or /dev:/dev for all devices
+```
+
+When running the exporter as a native systemd service (not in a container), the binary has full host access and no mount change is needed.
+
+### Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_nvme_info` | gauge (always 1) | `device`, `serial`, `model`, `firmware_rev` | Controller identity |
+| `crusoe_vm_nvme_smart_critical_warning` | gauge (0/1) | `device`, `serial`, `bit` | SMART critical warning bit. `bit` values: `spare_low`, `temperature`, `reliability`, `readonly`, `volatile_backup_failed`, `pmr_unreliable` |
+| `crusoe_vm_nvme_media_errors_total` | counter | `device`, `serial` | Uncorrectable media and data integrity errors |
+| `crusoe_vm_nvme_error_log_entries_total` | counter | `device`, `serial` | Lifetime error log entries |
+| `crusoe_vm_nvme_percentage_used` | gauge | `device`, `serial` | Drive life consumed (0–255; 100 = rated endurance reached) |
+| `crusoe_vm_nvme_available_spare` | gauge | `device`, `serial` | Remaining spare capacity (0–100%) |
+| `crusoe_vm_nvme_power_on_hours` | gauge | `device`, `serial` | Lifetime power-on hours |
+| `crusoe_vm_nvme_collection_errors_total` | gauge | (none) | SMART read errors observed in this scrape (aggregate across all devices; per-device failures are logged at WARN level) |
+
+---
+
 ## Daemonset Example
 
 Minimal daemonset env block with all three collectors:
