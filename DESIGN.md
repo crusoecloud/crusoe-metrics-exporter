@@ -182,6 +182,26 @@ The exporter listens on port 9500 and exposes `/metrics` (Prometheus) and `/heal
 
 ---
 
+## NVMe Controller Collector
+
+### What it monitors
+
+On VMs with PCIe-passthrough NVMe drives, the collector emits controller identity (serial, model, firmware revision) as labels and SMART health signals (critical-warning bits, media errors, error-log entries, percentage used, available spare, power-on hours) as gauges and counters. On virtio-only VMs there are no passthrough controllers and the collector is silently disabled at startup — no metrics are registered, and `/metrics` output is unaffected.
+
+### Design
+
+**Probe-once at startup.** Unlike the other collectors, which register unconditionally and surface failures per scrape, this one decides at startup whether to register at all. The check confirms that at least one passthrough controller is visible and that the corresponding device file can be opened. The asymmetry is justified because device-file permissions are fixed by the deployment model (privileged container or root systemd unit) and do not change at runtime — there is no benefit to retrying every scrape, and avoiding registration on virtio-only VMs keeps `/metrics` clean.
+
+**Scrape-driven SMART reads.** SMART data is collected on demand inside the Prometheus scrape; no background goroutine maintains state. Scrape cadence is owned upstream (Vector, ~60 s), and per-scrape overhead is negligible. See [exporter-deployment-model.md](notes/exporter-deployment-model.md) for scrape cadence ownership.
+
+**Cached device list and identity.** The device list and per-device identity labels are cached together and refreshed on a long TTL. Hot-plug of passthrough NVMe is not a supported scenario in our fleet, so the TTL exists purely to pick up in-place firmware updates and survive transient sysfs hiccups. On refresh failure the timestamp is not advanced, so the next scrape retries.
+
+**Per-scrape error gauge.** Individual SMART-read failures do not abort the scrape; they are logged and reflected in a `collection_errors_total` gauge so monitoring can alert on persistent failures without losing the rest of the metrics.
+
+**Deployment.** The exporter container mounts `/sys` read-only but does not mount `/dev` by default. Deployments that want NVMe controller metrics must add a device mount covering the passthrough NVMe device files; native-systemd deployments have full host access and need no changes.
+
+---
+
 ## Metric naming and downstream processing
 
 All metrics are prefixed with `crusoe_vm_` (defined in `src/collectors/constants.go`). A downstream data processor (`cms-data-processor`) maps these metric names for customer-facing dashboards and internal monitoring. Every metric exported by this agent must have a corresponding entry in the data processor's metric mapping configuration to ensure it is correctly routed and labeled.
