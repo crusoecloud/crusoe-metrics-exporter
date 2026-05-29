@@ -13,10 +13,10 @@ import (
 // TestNFSLatencyCollectorConfig tests the NFS configuration
 func TestNFSLatencyCollectorConfig(t *testing.T) {
 	config := NFSConfig{
-		ServerIPs:           []string{"172.27.255.32", "10.0.0.1"},
-		Protocols:           []string{"tcp", "udp"},
-		TargetPorts:         []uint16{2049},
-		EnableVolumeID:      true,
+		ServerIPs:            []string{"172.27.255.32", "10.0.0.1"},
+		Protocols:            []string{"tcp", "udp"},
+		TargetPorts:          []uint16{2049},
+		EnableVolumeID:       true,
 		MountRefreshInterval: 30 * time.Second,
 	}
 
@@ -204,12 +204,12 @@ func TestNFSMetricsWithRealIPs(t *testing.T) {
 
 	for metric := range ch {
 		metricCount++
-		
+
 		// Get metric description to check labels
 		desc := metric.Desc()
 		if desc != nil {
 			descString := desc.String()
-			
+
 			// Check if metric contains expected IP in labels
 			if strings.Contains(descString, expectedIP) {
 				realIPFound = true
@@ -269,14 +269,14 @@ func TestNFSIPByteOrderConversion(t *testing.T) {
 			expected: 0x6401000a,
 		},
 		{
-			name:     "IP 192.168.1.50", 
+			name:     "IP 192.168.1.50",
 			ipString: "192.168.1.50",
 			// 192.168.1.50 bytes [c0,a8,01,32] in little-endian: 0x3201a8c0
 			expected: 0x3201a8c0,
 		},
 		{
 			name:     "IP 127.0.0.1",
-			ipString: "127.0.0.1", 
+			ipString: "127.0.0.1",
 			// 127.0.0.1 in little-endian: 0x0100007f
 			expected: 0x0100007f,
 		},
@@ -301,18 +301,18 @@ func TestNFSIPByteOrderConversion(t *testing.T) {
 
 			// Verify the byte order is correct
 			if ipUint32 != tc.expected {
-				t.Errorf("IP %s conversion: got 0x%08x, expected 0x%08x", 
+				t.Errorf("IP %s conversion: got 0x%08x, expected 0x%08x",
 					tc.ipString, ipUint32, tc.expected)
 			}
 
 			// Also verify it's NOT big-endian (which would be wrong)
 			bigEndianValue := binary.BigEndian.Uint32(ipv4)
 			if ipUint32 == bigEndianValue {
-				t.Errorf("IP %s: little-endian and big-endian values are the same (0x%08x), this is suspicious", 
+				t.Errorf("IP %s: little-endian and big-endian values are the same (0x%08x), this is suspicious",
 					tc.ipString, ipUint32)
 			}
 
-			t.Logf("✅ IP %s: little-endian 0x%08x (correct), big-endian 0x%08x (would be wrong)", 
+			t.Logf("✅ IP %s: little-endian 0x%08x (correct), big-endian 0x%08x (would be wrong)",
 				tc.ipString, ipUint32, bigEndianValue)
 		})
 	}
@@ -321,7 +321,7 @@ func TestNFSIPByteOrderConversion(t *testing.T) {
 // TestNFSIPConversionConsistency tests that NFS collector uses consistent byte order
 func TestNFSIPConversionConsistency(t *testing.T) {
 	testIP := "10.0.1.100"
-	
+
 	// Parse IP once
 	parsedIP := net.ParseIP(testIP)
 	if parsedIP == nil {
@@ -338,18 +338,18 @@ func TestNFSIPConversionConsistency(t *testing.T) {
 
 	// They should be different for a non-symmetric IP
 	if littleEndianValue == bigEndianValue {
-		t.Errorf("Little-endian and big-endian values are the same (0x%08x) for IP %s", 
+		t.Errorf("Little-endian and big-endian values are the same (0x%08x) for IP %s",
 			littleEndianValue, testIP)
 	}
 
 	// Verify little-endian is what we expect
 	expectedLittleEndian := uint32(0x6401000a) // 10.0.1.100 in little-endian
 	if littleEndianValue != expectedLittleEndian {
-		t.Errorf("Little-endian conversion: got 0x%08x, expected 0x%08x", 
+		t.Errorf("Little-endian conversion: got 0x%08x, expected 0x%08x",
 			littleEndianValue, expectedLittleEndian)
 	}
 
-	t.Logf("✅ IP %s: little-endian 0x%08x, big-endian 0x%08x", 
+	t.Logf("✅ IP %s: little-endian 0x%08x, big-endian 0x%08x",
 		testIP, littleEndianValue, bigEndianValue)
 }
 
@@ -372,7 +372,7 @@ func TestNFSEBPFMapPopulation(t *testing.T) {
 
 	// Test that we can call the update function without error
 	testMapping := map[string]string{
-		"10.0.1.100": "vol-12345",
+		"10.0.1.100":   "vol-12345",
 		"192.168.1.50": "vol-67890",
 	}
 
@@ -385,42 +385,125 @@ func TestNFSEBPFMapPopulation(t *testing.T) {
 	t.Log("✅ NFS eBPF map population succeeded with correct byte order")
 }
 
+// TestExtractRemotePortsIPs tests the remoteports= mount option parsing
+func TestExtractRemotePortsIPs(t *testing.T) {
+	// We need a minimal collector instance for the method receiver (it uses resolveDomainName)
+	c := &NFSLatencyCollector{}
+
+	t.Run("IP range 4 IPs", func(t *testing.T) {
+		options := "rw,relatime,vers=3,nconnect=16,remoteports=10.0.0.1-10.0.0.4,addr=10.0.0.1"
+		ips := c.extractRemotePortsIPs(options, "10.0.0.1")
+		expected := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+		if len(ips) != len(expected) {
+			t.Fatalf("expected %d IPs, got %d: %v", len(expected), len(ips), ips)
+		}
+		for i, ip := range expected {
+			if ips[i] != ip {
+				t.Errorf("ips[%d]: got %q, want %q", i, ips[i], ip)
+			}
+		}
+	})
+
+	t.Run("single IP", func(t *testing.T) {
+		options := "rw,relatime,vers=3,remoteports=10.0.0.4,addr=10.0.0.4"
+		ips := c.extractRemotePortsIPs(options, "10.0.0.4")
+		if len(ips) != 1 || ips[0] != "10.0.0.4" {
+			t.Fatalf("expected [10.0.0.4], got %v", ips)
+		}
+	})
+
+	t.Run("DNS resolves to multiple IPs", func(t *testing.T) {
+		// dns.google reliably resolves to 8.8.8.8 and 8.8.4.4 (at minimum)
+		options := "rw,relatime,vers=3,nconnect=16,remoteports=dns,addr=8.8.8.8"
+		ips := c.extractRemotePortsIPs(options, "dns.google")
+		if len(ips) < 2 {
+			t.Skipf("Skipping: dns.google resolved to fewer than 2 IPs (got %d: %v); DNS may be restricted", len(ips), ips)
+		}
+		for _, ip := range ips {
+			if net.ParseIP(ip) == nil {
+				t.Errorf("invalid IP in result: %q", ip)
+			}
+		}
+		t.Logf("remoteports=dns with dns.google resolved to %d IPs: %v", len(ips), ips)
+	})
+
+	t.Run("DNS resolves to 1 IP", func(t *testing.T) {
+		// Use localhost which should resolve to a single IP
+		options := "rw,relatime,vers=3,remoteports=dns,addr=127.0.0.1"
+		ips := c.extractRemotePortsIPs(options, "localhost")
+		if len(ips) < 1 {
+			t.Skipf("Skipping: localhost did not resolve (got %v); DNS may be restricted", ips)
+		}
+		for _, ip := range ips {
+			if net.ParseIP(ip) == nil {
+				t.Errorf("invalid IP in result: %q", ip)
+			}
+		}
+		t.Logf("remoteports=dns with localhost resolved to %d IPs: %v", len(ips), ips)
+	})
+
+	t.Run("DNS with raw IP server is no-op", func(t *testing.T) {
+		// When serverPart is already an IP, remoteports=dns should return nothing
+		options := "rw,relatime,vers=3,remoteports=dns,addr=10.0.0.1"
+		ips := c.extractRemotePortsIPs(options, "10.0.0.1")
+		if len(ips) != 0 {
+			t.Errorf("expected no IPs for remoteports=dns with IP server, got %v", ips)
+		}
+	})
+
+	t.Run("no remoteports option", func(t *testing.T) {
+		options := "rw,relatime,vers=3,addr=10.0.0.1"
+		ips := c.extractRemotePortsIPs(options, "10.0.0.1")
+		if len(ips) != 0 {
+			t.Errorf("expected no IPs, got %v", ips)
+		}
+	})
+
+	t.Run("empty remoteports", func(t *testing.T) {
+		options := "rw,relatime,remoteports=,addr=10.0.0.1"
+		ips := c.extractRemotePortsIPs(options, "10.0.0.1")
+		if len(ips) != 0 {
+			t.Errorf("expected no IPs, got %v", ips)
+		}
+	})
+}
+
 // TestMountOptionsParsing tests mount options parsing
 func TestMountOptionsParsing(t *testing.T) {
 	testCases := []struct {
 		name           string
 		mountOptions   string
 		expectedIP     string
-		expectedVolume  string
+		expectedVolume string
 		expectError    bool
 	}{
 		{
-			name:          "StandardNFSMount",
-			mountOptions:  "addr=172.27.255.32,vers=4.1,rsize=1048576,wsize=1048576,hard",
-			expectedIP:    "172.27.255.32",
+			name:           "StandardNFSMount",
+			mountOptions:   "addr=172.27.255.32,vers=4.1,rsize=1048576,wsize=1048576,hard",
+			expectedIP:     "172.27.255.32",
 			expectedVolume: "",
-			expectError:   false,
+			expectError:    false,
 		},
 		{
-			name:          "MountWithVolumeID",
-			mountOptions:  "addr=10.0.0.1,volume_id=vol-123456",
-			expectedIP:    "10.0.0.1",
+			name:           "MountWithVolumeID",
+			mountOptions:   "addr=10.0.0.1,volume_id=vol-123456",
+			expectedIP:     "10.0.0.1",
 			expectedVolume: "vol-123456",
-			expectError:   false,
+			expectError:    false,
 		},
 		{
-			name:          "EmptyOptions",
-			mountOptions:  "",
-			expectedIP:    "",
+			name:           "EmptyOptions",
+			mountOptions:   "",
+			expectedIP:     "",
 			expectedVolume: "",
-			expectError:   false,
+			expectError:    false,
 		},
 		{
-			name:          "NoAddrOption",
-			mountOptions:  "vers=4.1,rsize=1048576,wsize=1048576",
-			expectedIP:    "",
+			name:           "NoAddrOption",
+			mountOptions:   "vers=4.1,rsize=1048576,wsize=1048576",
+			expectedIP:     "",
 			expectedVolume: "",
-			expectError:   false,
+			expectError:    false,
 		},
 	}
 
@@ -430,7 +513,7 @@ func TestMountOptionsParsing(t *testing.T) {
 			// For now, we just verify the parsing logic works with string operations
 			options := strings.Split(tc.mountOptions, ",")
 			var foundIP, foundVolume string
-			
+
 			for _, opt := range options {
 				opt = strings.TrimSpace(opt)
 				if strings.HasPrefix(opt, "addr=") {
@@ -439,11 +522,11 @@ func TestMountOptionsParsing(t *testing.T) {
 					foundVolume = strings.TrimPrefix(opt, "volume_id=")
 				}
 			}
-			
+
 			if foundIP != tc.expectedIP {
 				t.Errorf("Expected IP %s, got %s", tc.expectedIP, foundIP)
 			}
-			
+
 			if foundVolume != tc.expectedVolume {
 				t.Errorf("Expected volume %s, got %s", tc.expectedVolume, foundVolume)
 			}

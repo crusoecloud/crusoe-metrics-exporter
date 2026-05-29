@@ -351,6 +351,73 @@ func (c *NFSLatencyCollector) extractIPsFromMountOptions(fields []string) []stri
 	return ips
 }
 
+// extractRemotePortsIPs parses the remoteports= mount option to discover
+// additional NFS server IPs.  Supported formats:
+//   - remoteports=IP1-IP2        (IP range, e.g. 100.64.0.2-100.64.0.17)
+//   - remoteports=dns            (resolve the mount server FQDN via DNS)
+//   - remoteports=IP1,IP2,...    (comma-separated IPs)
+//
+// serverPart is the server portion of the NFS device (e.g. "nfs.foo.com" or
+// "100.64.0.2"), used when remoteports=dns.
+func (c *NFSLatencyCollector) extractRemotePortsIPs(options string, serverPart string) []string {
+	var ips []string
+
+	// Find remoteports= in the comma-delimited options string
+	for _, opt := range strings.Split(options, ",") {
+		if !strings.HasPrefix(opt, "remoteports=") {
+			continue
+		}
+		val := strings.TrimPrefix(opt, "remoteports=")
+		if val == "" {
+			continue
+		}
+
+		// Case 1: "dns" — resolve the mount server FQDN
+		if val == "dns" {
+			if net.ParseIP(serverPart) != nil {
+				// Server is already an IP, nothing to resolve
+				break
+			}
+			resolved := c.resolveDomainName(serverPart)
+			if len(resolved) > 0 {
+				log.Infof("remoteports=dns: resolved %q to %d IPs", serverPart, len(resolved))
+			}
+			ips = append(ips, resolved...)
+			break
+		}
+
+		// Case 2: IP range "startIP-endIP"
+		if strings.Count(val, "-") == 1 && !strings.Contains(val, ",") {
+			parts := strings.SplitN(val, "-", 2)
+			startIP := net.ParseIP(parts[0]).To4()
+			endIP := net.ParseIP(parts[1]).To4()
+			if startIP != nil && endIP != nil {
+				s := binary.BigEndian.Uint32(startIP)
+				e := binary.BigEndian.Uint32(endIP)
+				if e >= s && (e-s) < 256 { // sanity cap
+					for addr := s; addr <= e; addr++ {
+						var buf [4]byte
+						binary.BigEndian.PutUint32(buf[:], addr)
+						ips = append(ips, net.IP(buf[:]).String())
+					}
+					log.Infof("remoteports=%s: expanded to %d IPs", val, len(ips))
+				}
+			}
+			break
+		}
+
+		// Case 3: comma-separated IPs (or single IP)
+		for _, ipStr := range strings.Split(val, ",") {
+			ipStr = strings.TrimSpace(ipStr)
+			if net.ParseIP(ipStr) != nil {
+				ips = append(ips, ipStr)
+			}
+		}
+		break
+	}
+	return ips
+}
+
 // updateVolumeMapping updates the volume mapping from mount information and
 // refreshes the eBPF nfs_server_ips map with ALL discovered NFS server IPs
 // (not just those with volume ID mappings).
@@ -380,20 +447,28 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 			continue
 		}
 
+		// Extract server part (hostname or IP) from device field
+		var serverName string
+		colonIdx := strings.Index(serverPath, ":")
+		if colonIdx > 0 {
+			serverName = serverPath[:colonIdx]
+		}
+
 		// Discover IPs from this NFS mount (addr= option or server part)
 		var mountIPs []string
 		if len(fields) >= 6 {
 			mountIPs = c.extractIPsFromMountOptions(fields)
+
+			// Also extract IPs from remoteports= (nconnect multi-IP)
+			optionsString := fields[3]
+			rpIPs := c.extractRemotePortsIPs(optionsString, serverName)
+			mountIPs = append(mountIPs, rpIPs...)
 		}
-		if len(mountIPs) == 0 {
-			colonIdx := strings.Index(serverPath, ":")
-			if colonIdx > 0 {
-				serverPart := serverPath[:colonIdx]
-				if net.ParseIP(serverPart) != nil {
-					mountIPs = []string{serverPart}
-				} else {
-					mountIPs = c.resolveDomainName(serverPart)
-				}
+		if len(mountIPs) == 0 && serverName != "" {
+			if net.ParseIP(serverName) != nil {
+				mountIPs = []string{serverName}
+			} else {
+				mountIPs = c.resolveDomainName(serverName)
 			}
 		}
 
@@ -501,19 +576,30 @@ func (c *NFSLatencyCollector) populateNFSServerIPs() error {
 				continue
 			}
 
+			// Extract server part (hostname or IP) from device field
+			serverPath := fields[0]
+			var serverPart string
+			colonIdx := strings.Index(serverPath, ":")
+			if colonIdx > 0 {
+				serverPart = serverPath[:colonIdx]
+			}
+
 			// Extract IPs from mount options (addr=X.X.X.X)
 			if len(fields) >= 6 {
 				ips := c.extractIPsFromMountOptions(fields)
 				for _, ip := range ips {
 					uniqueIPs[ip] = true
 				}
+
+				// Also extract IPs from remoteports= (nconnect multi-IP)
+				rpIPs := c.extractRemotePortsIPs(fields[3], serverPart)
+				for _, ip := range rpIPs {
+					uniqueIPs[ip] = true
+				}
 			}
 
 			// Also try the server part of device (server:/path)
-			serverPath := fields[0]
-			colonIdx := strings.Index(serverPath, ":")
-			if colonIdx > 0 {
-				serverPart := serverPath[:colonIdx]
+			if serverPart != "" {
 				if parsedIP := net.ParseIP(serverPart); parsedIP != nil {
 					uniqueIPs[serverPart] = true
 				} else {
