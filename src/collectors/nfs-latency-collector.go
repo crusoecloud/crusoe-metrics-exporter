@@ -389,8 +389,13 @@ func (c *NFSLatencyCollector) extractRemotePortsIPs(options string, serverPart s
 		// Case 2: IP range "startIP-endIP"
 		if strings.Count(val, "-") == 1 && !strings.Contains(val, ",") {
 			parts := strings.SplitN(val, "-", 2)
-			startIP := net.ParseIP(parts[0]).To4()
-			endIP := net.ParseIP(parts[1]).To4()
+			startParsed := net.ParseIP(parts[0])
+			endParsed := net.ParseIP(parts[1])
+			if startParsed == nil || endParsed == nil {
+				break
+			}
+			startIP := startParsed.To4()
+			endIP := endParsed.To4()
 			if startIP != nil && endIP != nil {
 				s := binary.BigEndian.Uint32(startIP)
 				e := binary.BigEndian.Uint32(endIP)
