@@ -83,7 +83,8 @@ func (c *DNSProbeCollector) probe() {
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return net.Dialer{Timeout: 5 * time.Second}.DialContext(ctx, "udp", c.resolver+":53")
+			d := net.Dialer{Timeout: 5 * time.Second}
+			return d.DialContext(ctx, "udp", c.resolver+":53")
 		},
 	}
 
