@@ -203,6 +203,20 @@ func main() {
 	defer probeCollector.Close()
 	log.Infof("Health probe collector enabled (objstore_fqdn: %q, mounts: %s)", objStoreFQDN, hostMountsPath)
 
+	// DNS probe collector (resolution latency, success, failure, total)
+	dnsProbTarget := os.Getenv("DNS_PROBE_TARGET")
+	if dnsProbTarget == "" {
+		dnsProbTarget = "nfs.crusoecloudcompute.com"
+	}
+	dnsProbeResolver := os.Getenv("DNS_PROBE_RESOLVER")
+	if dnsProbeResolver == "" {
+		dnsProbeResolver = "8.8.8.8"
+	}
+	dnsProbeCollector := collectors.NewDNSProbeCollector(dnsProbTarget, dnsProbeResolver, probeInterval)
+	registry.MustRegister(dnsProbeCollector)
+	defer dnsProbeCollector.Close()
+	log.Infof("DNS probe collector enabled (target: %q, resolver: %q)", dnsProbTarget, dnsProbeResolver)
+
 	// Register shared DNS failure counter
 	registry.MustRegister(collectors.DNSResolveFailures)
 
