@@ -1,6 +1,6 @@
 # Crusoe Metrics Exporter
 
-A Prometheus-compatible metrics exporter for Crusoe VMs. Collects disk I/O, NFS, and object store metrics using a combination of eBPF kernel probes and procfs/mountstats parsing.
+A Prometheus-compatible metrics exporter for Crusoe VMs. Collects disk I/O, NFS, object store, and NVMe controller health metrics using a combination of eBPF kernel probes, procfs/mountstats parsing, and NVMe admin commands.
 
 ## Features
 
@@ -9,6 +9,7 @@ A Prometheus-compatible metrics exporter for Crusoe VMs. Collects disk I/O, NFS,
 - **TCP retransmit counters** -- per-destination retransmit tracking for NFS and object store as an availability signal
 - **NFS mountstats parsing** -- RPC counts, RTT, execution time, timeouts, and backlog from `/proc/1/mountstats`
 - **Volume ID labeling** -- NFS metrics labeled by Crusoe volume ID extracted from mount paths
+- **NVMe SMART/Health monitoring** -- passthrough drive health via admin commands (critical warnings, media errors, endurance, spare capacity)
 - **Modular collector architecture** -- each subsystem is an independent `prometheus.Collector`
 - **Graceful degradation** -- eBPF collectors log warnings and continue if the kernel lacks support
 - **Containerized deployment** -- runs as a sidecar in a Kubernetes DaemonSet
@@ -138,6 +139,27 @@ Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. 
 | `crusoe_vm_nfs_bytes_recv_total` | Counter | `volume_id`, `nfs_operation` | Total bytes received (from mountstats) |
 | `crusoe_vm_nfs_stats_collection_errors_total` | Counter | - | Collection errors |
 
+### NVMe Controller Collector
+
+**Source:** `src/collectors/nvme-controller-collector.go` | **Admin commands:** `src/collectors/nvme_admin.go`
+
+Reports controller identity and SMART/Health Log (Page 0x02) for PCIe-passthrough NVMe drives. Enabled only when at least one NVMe controller is visible under `/sys/class/nvme` **and** the device file `/dev/nvme0` is openable. On virtio-only VMs the collector is silently skipped; no metrics are registered.
+
+**No environment variables required.** Enabled/disabled by a one-shot startup probe.
+
+> **Deployment note:** The container must have access to `/dev/nvme*`. Add a bind mount (e.g. `/dev/nvme0:/dev/nvme0`) to the compose file or Helm values. Native systemd deployments have full host access and need no change.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_nvme_info` | Gauge (always 1) | `device`, `serial`, `model`, `firmware_rev` | Controller identity |
+| `crusoe_vm_nvme_smart_critical_warning` | Gauge (0/1) | `device`, `serial`, `bit` | SMART critical warning bit (`spare_low`, `temperature`, `reliability`, `readonly`, `volatile_backup_failed`, `pmr_unreliable`) |
+| `crusoe_vm_nvme_media_errors_total` | Counter | `device`, `serial` | Uncorrectable media and data integrity errors |
+| `crusoe_vm_nvme_error_log_entries_total` | Counter | `device`, `serial` | Lifetime error log entries |
+| `crusoe_vm_nvme_percentage_used` | Gauge | `device`, `serial` | Drive life consumed (0--255; 100 = rated endurance reached) |
+| `crusoe_vm_nvme_available_spare` | Gauge | `device`, `serial` | Remaining spare capacity (0--100%) |
+| `crusoe_vm_nvme_power_on_hours` | Gauge | `device`, `serial` | Lifetime power-on hours |
+| `crusoe_vm_nvme_collection_errors_total` | Gauge | - | SMART read errors in this scrape |
+
 ### Object Store Connection Collector (eBPF)
 
 **Source:** `src/collectors/objstore-latency-collector.go` | **eBPF:** `ebpf/objstore_latency.c`
@@ -175,6 +197,15 @@ rate(crusoe_vm_objectstore_tcp_retransmits_total[5m])
 
 # Disk write latency p99 (histogram)
 histogram_quantile(0.99, rate(crusoe_vm_disk_write_latency_seconds[5m]))
+
+# NVMe drives with any critical warning bit set
+crusoe_vm_nvme_smart_critical_warning == 1
+
+# NVMe drives approaching end of life (percentage_used ≥ 90)
+crusoe_vm_nvme_percentage_used >= 90
+
+# NVMe media error rate
+rate(crusoe_vm_nvme_media_errors_total[1h])
 ```
 
 ---
@@ -201,6 +232,8 @@ histogram_quantile(0.99, rate(crusoe_vm_disk_write_latency_seconds[5m]))
 │       ├── nfs-stats-collector.go               # NFS RPC stats from /proc/1/mountstats
 │       ├── nfs-latency-collector.go             # NFS latency via eBPF kprobes
 │       ├── objstore-latency-collector.go        # Object store latency via eBPF kprobes
+│       ├── nvme-controller-collector.go         # NVMe SMART/Health via admin commands
+│       ├── nvme_admin.go                        # NVMe ioctl helpers (Get Log Page)
 │       └── ebpf/                                # Compiled eBPF bytecode (embedded via go:embed)
 │           ├── disk_latency.o
 │           ├── nfs_latency.o
