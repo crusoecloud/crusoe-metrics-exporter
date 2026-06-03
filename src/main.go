@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"metrics-exporter/src/collectors"
 	"metrics-exporter/src/log"
+	"metrics-exporter/src/nodeutil"
 	"net"
 	"net/http"
 	"os"
@@ -139,6 +140,14 @@ func main() {
 	}
 
 	// Object store latency collector (eBPF-based)
+	//
+	// FQDN resolution order:
+	//  1. Explicit OBJSTORE_ENDPOINT_FQDN env var (operator override).
+	//  2. Derive from NODE_NAME: extract region from the Crusoe node name
+	//     (e.g. "np-88fe80e2-1.us-west1-a.compute.internal" → "us-west1-a")
+	//     and construct "object.<region>.crusoecloudcompute.com".
+	//  3. Legacy OBJSTORE_ENDPOINT_IPS (comma-separated IPs, no re-resolution).
+	//  4. Skip object store probes.
 	objStoreIPs := []string{}
 	objStoreFQDN := ""
 	if fqdn := os.Getenv("OBJSTORE_ENDPOINT_FQDN"); fqdn != "" {
@@ -151,6 +160,16 @@ func main() {
 			objStoreIPs = resolved
 			log.Infof("Resolved OBJSTORE_ENDPOINT_FQDN=%q to %d IPs: %v", fqdn, len(resolved), resolved)
 		}
+	} else if region, err := nodeutil.RegionFromNodeName(os.Getenv("NODE_NAME")); err == nil {
+		fqdn := nodeutil.ObjStoreEndpoint(region)
+		objStoreFQDN = fqdn
+		resolved, err := resolveObjStoreFQDN(fqdn)
+		if err != nil {
+			log.Errorf("Derived OBJSTORE_ENDPOINT_FQDN=%q from NODE_NAME but DNS resolution failed: %v", fqdn, err)
+		} else {
+			objStoreIPs = resolved
+			log.Infof("Derived OBJSTORE_ENDPOINT_FQDN=%q from NODE_NAME, resolved to %d IPs: %v", fqdn, len(resolved), resolved)
+		}
 	} else if ipsStr := os.Getenv("OBJSTORE_ENDPOINT_IPS"); ipsStr != "" {
 		for _, ip := range strings.Split(ipsStr, ",") {
 			ip = strings.TrimSpace(ip)
@@ -159,7 +178,7 @@ func main() {
 			}
 		}
 	} else {
-		log.Warnf("Neither OBJSTORE_ENDPOINT_FQDN nor OBJSTORE_ENDPOINT_IPS was set, skipping objectstore probes")
+		log.Warnf("OBJSTORE_ENDPOINT_FQDN not set and could not derive region from NODE_NAME: %v; skipping objectstore probes", err)
 	}
 
 	var objStorePorts []uint16
