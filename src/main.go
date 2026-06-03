@@ -204,18 +204,29 @@ func main() {
 	log.Infof("Health probe collector enabled (objstore_fqdn: %q, mounts: %s)", objStoreFQDN, hostMountsPath)
 
 	// DNS probe collector (resolution latency, success, failure, total)
-	dnsProbTarget := os.Getenv("DNS_PROBE_TARGET")
-	if dnsProbTarget == "" {
-		dnsProbTarget = "nfs.crusoecloudcompute.com"
+	dnsProbeTargets := []string{"nfs.crusoecloudcompute.com", "google.com"}
+	if targetsStr := os.Getenv("DNS_PROBE_TARGETS"); targetsStr != "" {
+		dnsProbeTargets = []string{}
+		for _, t := range strings.Split(targetsStr, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				dnsProbeTargets = append(dnsProbeTargets, t)
+			}
+		}
+	}
+	if objStoreFQDN != "" {
+		seen := make(map[string]bool)
+		for _, t := range dnsProbeTargets {
+			seen[t] = true
+		}
+		if !seen[objStoreFQDN] {
+			dnsProbeTargets = append(dnsProbeTargets, objStoreFQDN)
+		}
 	}
 	dnsProbeResolver := os.Getenv("DNS_PROBE_RESOLVER")
-	if dnsProbeResolver == "" {
-		dnsProbeResolver = "8.8.8.8"
-	}
-	dnsProbeCollector := collectors.NewDNSProbeCollector(dnsProbTarget, dnsProbeResolver, probeInterval)
+	dnsProbeCollector := collectors.NewDNSProbeCollector(dnsProbeTargets, dnsProbeResolver, probeInterval)
 	registry.MustRegister(dnsProbeCollector)
 	defer dnsProbeCollector.Close()
-	log.Infof("DNS probe collector enabled (target: %q, resolver: %q)", dnsProbTarget, dnsProbeResolver)
+	log.Infof("DNS probe collector enabled (targets: %v, resolver: %q)", dnsProbeTargets, dnsProbeResolver)
 
 	// Register shared DNS failure counter
 	registry.MustRegister(collectors.DNSResolveFailures)
