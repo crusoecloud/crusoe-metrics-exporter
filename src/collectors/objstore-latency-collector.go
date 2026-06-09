@@ -255,7 +255,7 @@ func (c *ObjStoreLatencyCollector) attachKprobes() error {
 
 // addObjStoreEndpoint resolves a hostname and adds its IPs to the endpoint filter map
 func (c *ObjStoreLatencyCollector) addObjStoreEndpoint(hostname string) error {
-	ips, err := net.LookupIP(hostname)
+	ips, err := LookupIP(hostname, "objectstore")
 	if err != nil {
 		return err
 	}
@@ -342,10 +342,9 @@ func (c *ObjStoreLatencyCollector) refreshFQDNIfNeeded() {
 		return
 	}
 
-	ips, err := net.LookupIP(c.config.FQDN)
+	ips, err := LookupIP(c.config.FQDN, "objectstore")
 	if err != nil {
 		log.Warnf("failed to re-resolve FQDN %s: %v", c.config.FQDN, err)
-		DNSResolveFailures.WithLabelValues("objectstore").Inc()
 		c.lastFQDNRefresh = time.Now()
 		return
 	}
@@ -560,8 +559,7 @@ func (c *ObjStoreLatencyCollector) updateObjStoreServerIPsMap() error {
 	// Collect unique object store server IPs from the filter list
 	uniqueIPs := make(map[string]bool)
 	for _, ipOrHost := range c.filterIPs {
-		// Resolve hostname to IPs
-		ips, err := net.LookupIP(ipOrHost)
+		ips, err := LookupIP(ipOrHost, "objectstore")
 		if err != nil {
 			log.Warnf("failed to resolve %s: %v", ipOrHost, err)
 			continue

@@ -5,7 +5,6 @@ import (
 	"metrics-exporter/src/collectors"
 	"metrics-exporter/src/log"
 	"metrics-exporter/src/nodeutil"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -232,8 +231,11 @@ func main() {
 	defer probeCollector.Close()
 	log.Infof("Health probe collector enabled (objstore_fqdn: %q, mounts: %s)", objStoreFQDN, hostMountsPath)
 
-	// Register shared DNS failure counter
+	// Register shared DNS metrics
+	registry.MustRegister(collectors.DNSResolveTotal)
+	registry.MustRegister(collectors.DNSResolveSuccesses)
 	registry.MustRegister(collectors.DNSResolveFailures)
+	registry.MustRegister(collectors.DNSResolveLatency)
 
 	http.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +250,7 @@ func main() {
 // resolveObjStoreFQDN resolves an FQDN to its IPv4 addresses via DNS.
 // It returns an error if the hostname cannot be resolved or yields no IPv4 addresses.
 func resolveObjStoreFQDN(fqdn string) ([]string, error) {
-	ips, err := net.LookupIP(fqdn)
+	ips, err := collectors.LookupIP(fqdn, "objectstore")
 	if err != nil {
 		return nil, fmt.Errorf("DNS lookup failed for %s: %w", fqdn, err)
 	}
