@@ -1,0 +1,48 @@
+device nfs.example.com:/volumes/00000000-0000-0000-0000-000000000001 mounted on /mnt/sharedfs with fstype nfs statvers=1.1
+	opts:	rw,vers=3,rsize=1048576,wsize=1048576,namlen=255,acregmin=3,acregmax=60,acdirmin=30,acdirmax=60,hard,forcerdirplus,proto=tcp,nconnect=16,timeo=600,retrans=2,sec=sys,mountaddr=10.0.0.1,mountvers=3,mountport=0,mountproto=tcp,local_lock=none,remoteports=dns,spread_reads,spread_writes
+	age:	245
+	caps:	caps=0xf,wtmult=4096,dtsize=131072,bsize=0,namlen=255
+	sec:	flavor=1,pseudoflavor=1
+	events:	35 209 0 0 33 23 271 397086 0 0 0 47 0 1 49 0 0 29 0 0 397086 0 0 0 0 0 0 
+	bytes:	0 1626377887 668377022464 0 668377022464 1465170212 0 357718 
+	RPC iostats version: 1.1  p/v: 100003/3 (nfs)
+	xprt:	tcp 825 1 2 0 0 40611 40611 0 68235 0 11 72 27606
+	xprt:	tcp 983 1 2 0 0 39390 39390 0 65541 0 11 70 26123
+	xprt:	tcp 866 1 2 0 0 41108 41108 0 67089 0 11 79 25964
+	xprt:	tcp 847 1 2 0 0 40933 40933 0 68639 0 11 80 27674
+	xprt:	tcp 756 1 2 0 0 39514 39514 0 66830 0 11 109 27280
+	xprt:	tcp 971 1 2 0 0 40805 40805 0 67870 0 11 93 27019
+	xprt:	tcp 735 1 2 0 0 41617 41617 0 66718 0 11 83 25076
+	xprt:	tcp 941 1 2 0 0 38755 38755 0 65044 0 11 60 26274
+	xprt:	tcp 984 1 2 0 0 39705 39705 0 65913 0 11 63 26178
+	xprt:	tcp 773 1 2 0 0 41172 41172 0 66220 0 11 57 25029
+	xprt:	tcp 726 1 2 0 0 37903 37903 0 63723 0 11 48 25812
+	xprt:	tcp 866 1 2 0 0 40208 40208 0 66653 0 11 61 26430
+	xprt:	tcp 716 1 2 0 0 39074 39074 0 65284 0 11 74 26192
+	xprt:	tcp 759 1 2 0 0 38801 38801 0 64350 0 11 84 25539
+	xprt:	tcp 799 1 2 0 0 38891 38891 0 64084 0 11 63 25163
+	xprt:	tcp 939 1 2 0 0 40449 40449 0 67248 0 11 107 26763
+	per-op statistics
+	        NULL: 16 16 0 704 384 154 165 320 0
+	     GETATTR: 35 35 0 3680 3920 0 30 31 0
+	     SETATTR: 3 3 0 412 432 0 7 7 0
+	      LOOKUP: 21 21 0 2740 3408 0 9 9 12
+	      ACCESS: 11 11 0 1188 1320 0 12 12 0
+	    READLINK: 0 0 0 0 0 0 0 0 0
+	        READ: 637414 637414 0 73940024 668458611456 21773 1379025 1526491 0
+	       WRITE: 1410 1410 0 1465345072 225600 589 27369 28100 0
+	      CREATE: 12 12 0 1880 3072 0 75 75 0
+	       MKDIR: 3 3 0 448 328 0 7 7 2
+	     SYMLINK: 0 0 0 0 0 0 0 0 0
+	       MKNOD: 0 0 0 0 0 0 0 0 0
+	      REMOVE: 0 0 0 0 0 0 0 0 0
+	       RMDIR: 0 0 0 0 0 0 0 0 0
+	      RENAME: 0 0 0 0 0 0 0 0 0
+	        LINK: 0 0 0 0 0 0 0 0 0
+	     READDIR: 0 0 0 0 0 0 0 0 0
+	 READDIRPLUS: 0 0 0 0 0 0 0 0 0
+	      FSSTAT: 3 3 0 432 504 0 19 19 0
+	      FSINFO: 2 2 0 288 328 0 0 0 0
+	    PATHCONF: 1 1 0 144 140 0 0 0 0
+	      COMMIT: 0 0 0 0 0 0 0 0 0
+

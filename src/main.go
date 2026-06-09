@@ -124,6 +124,25 @@ func main() {
 	registry.MustRegister(nfsStatsCollector)
 	log.Infof("NFS stats collector enabled (mountstats: %s)", mountStatsPath)
 
+	// NFS xprt collector (per-nconnect-lane metrics from mountstats:
+	// sends, recvs, connect_count, bad_xids, max_slots, idle_seconds,
+	// backlog_utilization per xprt_idx). Complements the per-volume
+	// aggregate metrics above by exposing the same /proc/self/mountstats
+	// data at lane granularity — needed for "how many of N nconnect
+	// lanes are alive" diagnostics.
+	nfsXprtCollector := collectors.NewNFSXprtCollector(mountStatsPath)
+	registry.MustRegister(nfsXprtCollector)
+	log.Infof("NFS xprt collector enabled (mountstats: %s)", mountStatsPath)
+
+	// NFS mount-events collector (per-mount kernel events, byte counters,
+	// and mount age from mountstats events:/bytes:/age: lines). Adds
+	// per-mount diagnostic signals (delay events, congestion_wait,
+	// direct/server bytes) that aren't visible in the per-op aggregate
+	// or per-xprt views.
+	nfsMountEventsCollector := collectors.NewNFSMountEventsCollector(mountStatsPath)
+	registry.MustRegister(nfsMountEventsCollector)
+	log.Infof("NFS mount-events collector enabled (mountstats: %s)", mountStatsPath)
+
 	// Disk usage collector (bytes used, inodes used per vd* device)
 	diskUsageCollector := collectors.NewDiskUsageCollector(hostMountsPath, hostProcPath+"/1/root")
 	registry.MustRegister(diskUsageCollector)
