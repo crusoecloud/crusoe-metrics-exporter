@@ -95,7 +95,7 @@ func NewNFSMountEventsCollector(mountStatsPath string) *NFSMountEventsCollector 
 		),
 		delay: prometheus.NewDesc(
 			MetricPrefix+"nfs_mount_delay_events_total",
-			"Per-mount count of kernel-imposed delays on client RPC requests, e.g. due to backpressure (events: index 25). Increases under cnode-side saturation.",
+			"Per-mount NFSv4 retry-after-DELAY counter — fires only on NFS4ERR_DELAY replies via nfs4_handle_exception (events: index 25). Structurally zero on NFSv3 mounts because v3 has no NFS4ERR_DELAY; v3 server back-pressure surfaces instead as RPC timeouts (nfs_rpc_timeouts_total) and reconnects (nfs_xprt_connect_count_total).",
 			volLabel, nil,
 		),
 		normalReadBytes: prometheus.NewDesc(
