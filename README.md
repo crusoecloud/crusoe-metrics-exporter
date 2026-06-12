@@ -7,7 +7,7 @@ A Prometheus-compatible metrics exporter for Crusoe VMs. Collects disk I/O, NFS,
 - **eBPF-based latency collection** -- kprobes on `tcp_sendmsg`, `tcp_recvmsg`, `tcp_retransmit_skb`, and block I/O tracepoints for high-fidelity, low-overhead measurements
 - **Histogram metrics** -- geometric bucket distributions for disk, NFS, and object store latency
 - **TCP retransmit counters** -- per-destination retransmit tracking for NFS and object store as an availability signal
-- **NFS mountstats parsing** -- RPC counts, RTT, execution time, timeouts, and backlog from `/proc/1/mountstats`
+- **NFS mountstats parsing** -- RPC counts, RTT, execution time, timeouts, backlog, per-`nconnect`-lane (xprt) state, and per-mount VFS/event counters from `/proc/1/mountstats`
 - **Volume ID labeling** -- NFS metrics labeled by Crusoe volume ID extracted from mount paths
 - **NVMe SMART/Health monitoring** -- passthrough drive health via admin commands (critical warnings, media errors, endurance, spare capacity)
 - **Modular collector architecture** -- each subsystem is an independent `prometheus.Collector`
@@ -139,6 +139,52 @@ Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. 
 | `crusoe_vm_nfs_bytes_recv_total` | Counter | `volume_id`, `nfs_operation` | Total bytes received (from mountstats) |
 | `crusoe_vm_nfs_stats_collection_errors_total` | Counter | - | Collection errors |
 
+### NFS Per-Xprt Collector (mountstats)
+
+**Source:** `src/collectors/nfs-xprt-collector.go`
+
+Parses the per-`xprt:` lines from `/proc/1/mountstats` and emits one series per `(volume_id, xprt_idx)` for each lane of an `nconnect`-mounted NFS volume. Complements the volume-aggregate NFS Stats Collector — those metrics collapse all `nconnect` transports into a single series, so per-lane diagnostics (dead lane, hot-spot, lane-specific reconnects) need this finer breakdown.
+
+`xprt_idx` is a 0-based index within the mount block, assigned in scan order. It is stable across reconnects (unlike `srcport`, which the kernel regenerates on each socket teardown), so PromQL time series stay continuous through normal NFS reconnect activity.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_nfs_xprt_sends_total` | Counter | `volume_id`, `xprt_idx` | NFS RPC requests sent on this xprt (lane). `rate() == 0` with `connect_count > 0` indicates a dead lane. |
+| `crusoe_vm_nfs_xprt_recvs_total` | Counter | `volume_id`, `xprt_idx` | NFS RPC replies received on this xprt (lane). |
+| `crusoe_vm_nfs_xprt_connect_count_total` | Counter | `volume_id`, `xprt_idx` | TCP_ESTABLISHED transitions on this xprt (initial connect + every reconnect). NOT the number of connect attempts. |
+| `crusoe_vm_nfs_xprt_bad_xids_total` | Counter | `volume_id`, `xprt_idx` | NFS RPC replies with mismatched XIDs — out-of-order or corrupted-frame indicator. |
+| `crusoe_vm_nfs_xprt_max_slots` | Gauge | `volume_id`, `xprt_idx` | High-water mark of slot table size. Stuck at 2 (kernel default) with no traffic indicates a lane that was never used. |
+| `crusoe_vm_nfs_xprt_idle_seconds` | Gauge | `volume_id`, `xprt_idx` | Seconds since the last activity on this xprt. |
+| `crusoe_vm_nfs_xprt_backlog_utilization` | Counter | `volume_id`, `xprt_idx` | Cumulative per-xprt backlog utilization (`bklog_u`). Per-lane breakdown of what NFS Stats Collector aggregates as `nfs_rpc_backlog`. |
+| `crusoe_vm_nfs_xprt_stats_collection_errors_total` | Counter | - | Collection errors. |
+
+### NFS Mount Events Collector (mountstats)
+
+**Source:** `src/collectors/nfs-mount-events-collector.go`
+
+Parses the per-mount `events:`, `bytes:`, and `age:` lines from `/proc/1/mountstats` and emits one series per `(volume_id)` for kernel-level mount counters. Complements the per-op NFS Stats Collector and the per-xprt collector by exposing **mount-level VFS and kernel-event counters** — bytes broken down by syscall path (page cache vs `O_DIRECT` vs over-the-wire) and event counters for client- and server-side back-pressure signals.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_nfs_mount_age_seconds` | Gauge | `volume_id` | Seconds since the NFS mount was established. Drops to a small value when the mount is recreated. |
+| `crusoe_vm_nfs_mount_congestion_wait_events_total` | Counter | `volume_id` | Client-side BDI writeback congestion waits. |
+| `crusoe_vm_nfs_mount_short_read_events_total` | Counter | `volume_id` | Reads where the server returned fewer bytes than requested. |
+| `crusoe_vm_nfs_mount_short_write_events_total` | Counter | `volume_id` | Writes where the server committed fewer bytes than requested. |
+| `crusoe_vm_nfs_mount_delay_events_total` | Counter | `volume_id` | NFSv4 retry-after-DELAY counter (`NFS4ERR_DELAY`). **Structurally zero on NFSv3 mounts** — see caveat below. |
+| `crusoe_vm_nfs_mount_normal_read_bytes_total` | Counter | `volume_id` | Bytes returned by buffered (non-`O_DIRECT`) `read()` syscalls. |
+| `crusoe_vm_nfs_mount_normal_write_bytes_total` | Counter | `volume_id` | Bytes written by buffered (non-`O_DIRECT`) `write()` syscalls. |
+| `crusoe_vm_nfs_mount_direct_read_bytes_total` | Counter | `volume_id` | Bytes returned by `O_DIRECT` reads (what `fio --direct=1` consumes). |
+| `crusoe_vm_nfs_mount_direct_write_bytes_total` | Counter | `volume_id` | Bytes written by `O_DIRECT` writes. |
+| `crusoe_vm_nfs_mount_server_read_bytes_total` | Counter | `volume_id` | Bytes actually fetched from the NFS server (over the wire). |
+| `crusoe_vm_nfs_mount_server_write_bytes_total` | Counter | `volume_id` | Bytes actually written to the NFS server (over the wire). |
+| `crusoe_vm_nfs_mount_read_pages_total` | Counter | `volume_id` | Pages read via `readpage`/`readpages` NFS ops. |
+| `crusoe_vm_nfs_mount_write_pages_total` | Counter | `volume_id` | Pages written via `writepage`/`writepages` NFS ops. |
+| `crusoe_vm_nfs_mount_events_collection_errors_total` | Counter | - | Collection errors. |
+
+> **NFSv3 caveat on `delay_events_total`:** This counter is bumped only by `nfs4_handle_exception` on `NFS4ERR_DELAY` replies, so it is **structurally zero on NFSv3 mounts** (v3 has no `NFS4ERR_DELAY`; the analogous `NFS3ERR_JUKEBOX` retry is handled at the SUNRPC layer and not surfaced as an `NFSIOS_*` event). On v3, server back-pressure surfaces instead as RPC timeouts (`nfs_rpc_timeouts_total`) and TCP-level reconnects (`nfs_xprt_connect_count_total`).
+
+> **Page-cache hit math:** `normal_read + direct_read − server_read` gives bytes served from the page cache. `server_read` accumulates wire fetches for both the buffered and `O_DIRECT` paths; since `O_DIRECT` bypasses the cache by definition, `server_for_direct = direct_read`, so `normal − (server − direct) = normal + direct − server` is the buffered-path bytes that did not go to the wire. On a pure `O_DIRECT` workload this expression is 0 (correct: no cache involvement).
+
 ### NVMe Controller Collector
 
 **Source:** `src/collectors/nvme-controller-collector.go` | **Admin commands:** `src/collectors/nvme_admin.go`
@@ -189,6 +235,23 @@ rate(crusoe_vm_nfs_rpc_timeouts_total[5m]) / rate(crusoe_vm_nfs_rpc_count_total[
 # NFS TCP retransmit rate
 rate(crusoe_vm_nfs_tcp_retransmits_total[5m])
 
+# Alive-lane count per nconnect mount (compare with mount's nconnect option)
+count(rate(crusoe_vm_nfs_xprt_sends_total[5m]) > 0) by (volume_id)
+
+# Per-lane backlog hot-spotting (which xprt is queuing)
+rate(crusoe_vm_nfs_xprt_backlog_utilization[5m]) > 0
+
+# Per-lane reconnect churn (server is resetting connections on this lane)
+rate(crusoe_vm_nfs_xprt_connect_count_total[5m]) > 0
+
+# Page-cache hit bytes per second (see Mount Events Collector for derivation)
+rate(crusoe_vm_nfs_mount_normal_read_bytes_total[5m])
+  + rate(crusoe_vm_nfs_mount_direct_read_bytes_total[5m])
+  - rate(crusoe_vm_nfs_mount_server_read_bytes_total[5m])
+
+# Server short-reply rate (truncated NFS responses — rare but real signal)
+rate(crusoe_vm_nfs_mount_short_read_events_total[5m])
+
 # Object store average connection latency per endpoint
 rate(crusoe_vm_objectstore_connection_latency_seconds[5m]) / rate(crusoe_vm_objectstore_connections_total[5m])
 
@@ -229,11 +292,14 @@ rate(crusoe_vm_nvme_media_errors_total[1h])
 │       ├── histogram_utils.go                   # Histogram bucket math (geometric boundaries)
 │       ├── disk-stats-collector.go              # Disk I/O from /proc/diskstats
 │       ├── disk-latency-collector.go            # Disk latency via eBPF tracepoints
-│       ├── nfs-stats-collector.go               # NFS RPC stats from /proc/1/mountstats
+│       ├── nfs-stats-collector.go               # NFS RPC per-op stats from /proc/1/mountstats
+│       ├── nfs-xprt-collector.go                # Per-nconnect-lane (xprt) state from mountstats
+│       ├── nfs-mount-events-collector.go        # Per-mount events/bytes/age from mountstats
 │       ├── nfs-latency-collector.go             # NFS latency via eBPF kprobes
 │       ├── objstore-latency-collector.go        # Object store latency via eBPF kprobes
 │       ├── nvme-controller-collector.go         # NVMe SMART/Health via admin commands
 │       ├── nvme_admin.go                        # NVMe ioctl helpers (Get Log Page)
+│       ├── testdata/                            # Golden fixtures for mountstats parsers
 │       └── ebpf/                                # Compiled eBPF bytecode (embedded via go:embed)
 │           ├── disk_latency.o
 │           ├── nfs_latency.o
