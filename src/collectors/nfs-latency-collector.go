@@ -279,10 +279,8 @@ func (c *NFSLatencyCollector) attachUDPProbes() error {
 func (c *NFSLatencyCollector) resolveDomainName(domainName string) []string {
 	var ips []string
 
-	// Try to resolve the domain name
-	addrs, err := net.LookupHost(domainName)
+	addrs, err := LookupHost(domainName, "nfs")
 	if err != nil {
-		DNSResolveFailures.WithLabelValues("nfs").Inc()
 		return ips
 	}
 

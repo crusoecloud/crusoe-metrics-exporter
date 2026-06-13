@@ -326,7 +326,7 @@ func (p *ProbeCollector) discoverNFSIPs() []string {
 				}
 			} else {
 				// Hostname — resolve via DNS to get all A records
-				resolved, err := net.LookupIP(serverPart)
+				resolved, err := LookupIP(serverPart, "nfs")
 				if err != nil {
 					log.Debugf("DNS resolution failed for NFS server %s: %v", serverPart, err)
 				} else {
@@ -356,10 +356,9 @@ func (p *ProbeCollector) resolveObjStoreIPs() []string {
 		return nil
 	}
 
-	ips, err := net.LookupIP(p.config.ObjStoreFQDN)
+	ips, err := LookupIP(p.config.ObjStoreFQDN, "objectstore")
 	if err != nil {
 		log.Warnf("Failed to resolve ObjStore FQDN %s for probing: %v", p.config.ObjStoreFQDN, err)
-		DNSResolveFailures.WithLabelValues("objectstore").Inc()
 		return nil
 	}
 
