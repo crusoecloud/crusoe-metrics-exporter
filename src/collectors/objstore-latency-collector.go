@@ -2,7 +2,10 @@ package collectors
 
 import (
 	_ "embed"
+	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"metrics-exporter/src/log"
 	"net"
@@ -18,6 +21,9 @@ import (
 
 //go:embed ebpf/objstore_latency.o
 var objstoreLatencyBPF []byte
+
+//go:embed ebpf/objstore_latency.sha256
+var objstoreLatencyBPFHash []byte
 
 // ObjStoreConfig holds configuration for object store latency monitoring
 type ObjStoreConfig struct {
@@ -154,6 +160,18 @@ func NewObjStoreLatencyCollector(config ObjStoreConfig) (*ObjStoreLatencyCollect
 
 // loadBPF loads the eBPF program from embedded bytecode
 func (c *ObjStoreLatencyCollector) loadBPF() error {
+	// Verify the embedded object file against its build-time SHA256 before
+	// handing anything to the kernel. This detects post-build image tampering.
+	pinnedHex := strings.TrimSpace(string(objstoreLatencyBPFHash))
+	pinnedDigest, err := hex.DecodeString(pinnedHex)
+	if err != nil {
+		return fmt.Errorf("eBPF integrity check: malformed pinned hash %q: %w", pinnedHex, err)
+	}
+	actualDigest := sha256.Sum256(objstoreLatencyBPF)
+	if !bytes.Equal(actualDigest[:], pinnedDigest) {
+		log.Fatalf("eBPF object integrity check failed: got %x, want %x — refusing to load", actualDigest, pinnedDigest)
+	}
+
 	spec, err := ebpf.LoadCollectionSpecFromReader(strings.NewReader(string(objstoreLatencyBPF)))
 	if err != nil {
 		return fmt.Errorf("failed to load eBPF spec: %w", err)

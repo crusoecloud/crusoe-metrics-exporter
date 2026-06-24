@@ -32,6 +32,7 @@ RUN mkdir -p src/collectors/ebpf && \
     for f in ebpf/*_${TARGETARCH}.o; do \
         base=$(basename "$f" _${TARGETARCH}.o); \
         cp "$f" "src/collectors/ebpf/${base}.o"; \
+        cp "ebpf/${base}_${TARGETARCH}.sha256" "src/collectors/ebpf/${base}.sha256"; \
     done
 
 # Build the binary (cross-compile via GOARCH, no QEMU needed)
