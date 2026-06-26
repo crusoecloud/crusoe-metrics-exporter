@@ -56,6 +56,10 @@ for src in "$SCRIPT_DIR"/*.c; do
         $CLANG -g -O2 -target bpf -D"$define" \
             -I"$REPO_ROOT" \
             -c "$src" -o "$dest"
+
+        # Write SHA256 sidecar so the Go loader can verify integrity at runtime.
+        sha256sum "$dest" | awk '{print $1}' > "${dest%.o}.sha256"
+        echo "  SHA256: $(cat "${dest%.o}.sha256")  -> ${dest%.o}.sha256"
     done
 done
 
