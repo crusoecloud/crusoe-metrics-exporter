@@ -147,6 +147,13 @@ func main() {
 	registry.MustRegister(diskUsageCollector)
 	log.Infof("Disk usage collector enabled (mounts: %s)", hostMountsPath)
 
+	// Memory pressure collector (PSI memory + mem-available/swap from meminfo).
+	// PSI is capability-gated inside the collector; meminfo is always present.
+	memPressureCollector := collectors.NewMemoryPressureCollector(
+		hostProcPath+"/pressure/memory", hostProcPath+"/meminfo")
+	registry.MustRegister(memPressureCollector)
+	log.Infof("Memory pressure collector enabled")
+
 	// NVMe controller collector — passthrough drives only; one-shot probe at
 	// startup decides whether to register (no passthrough → silent skip).
 	nvmeCollector := collectors.NewNVMeCollector()
