@@ -30,11 +30,11 @@ type MemoryPressureCollector struct {
 	psiMemoryPath string
 	meminfoPath   string
 
-	psiRatioDesc         *prometheus.Desc
-	psiStallSecondsDesc  *prometheus.Desc
-	memAvailableDesc     *prometheus.Desc
-	swapUsedDesc         *prometheus.Desc
-	collectionErrorsDesc *prometheus.Desc
+	psiRatioDesc        *prometheus.Desc
+	psiStallSecondsDesc *prometheus.Desc
+	memAvailableDesc    *prometheus.Desc
+	swapUsedDesc        *prometheus.Desc
+	collectionErrors    prometheus.Counter
 }
 
 // NewMemoryPressureCollector builds the collector. psiMemoryPath and meminfoPath
@@ -63,11 +63,10 @@ func NewMemoryPressureCollector(psiMemoryPath, meminfoPath string) *MemoryPressu
 			"Swap currently in use (SwapTotal - SwapFree), from /proc/meminfo.",
 			nil, nil,
 		),
-		collectionErrorsDesc: prometheus.NewDesc(
-			MetricPrefix+"mem_collection_errors_total",
-			"Total number of errors encountered during memory pressure collection.",
-			nil, nil,
-		),
+		collectionErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: MetricPrefix + "mem_collection_errors_total",
+			Help: "Total number of errors encountered during memory pressure collection.",
+		}),
 	}
 }
 
@@ -76,18 +75,24 @@ func (c *MemoryPressureCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.psiStallSecondsDesc
 	ch <- c.memAvailableDesc
 	ch <- c.swapUsedDesc
-	ch <- c.collectionErrorsDesc
+	c.collectionErrors.Describe(ch)
 }
 
 func (c *MemoryPressureCollector) Collect(ch chan<- prometheus.Metric) {
-	collectionErrors := 0.0
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("MemoryPressureCollector panic recovered: %v", r)
+		}
+	}()
+
+	errs := 0.0
 
 	stats, available, err := ParsePSI(c.psiMemoryPath)
 	switch {
 	case err != nil:
 
 		log.Warnf("memory pressure: failed to parse %s: %v", c.psiMemoryPath, err)
-		collectionErrors++
+		errs++
 	case !available:
 		// PSI not enabled publish no PSI series.
 	default:
@@ -97,13 +102,13 @@ func (c *MemoryPressureCollector) Collect(ch chan<- prometheus.Metric) {
 	mem, err := parseMeminfoBytes(c.meminfoPath, meminfoKeys)
 	if err != nil {
 		log.Warnf("memory pressure: failed to read %s: %v", c.meminfoPath, err)
-		collectionErrors++
+		errs++
 	} else {
 		if v, ok := mem["MemAvailable"]; ok {
 			ch <- prometheus.MustNewConstMetric(c.memAvailableDesc, prometheus.GaugeValue, v)
 		} else {
 			log.Warnf("memory pressure: MemAvailable missing from %s", c.meminfoPath)
-			collectionErrors++
+			errs++
 		}
 		total, okT := mem["SwapTotal"]
 		free, okF := mem["SwapFree"]
@@ -111,11 +116,12 @@ func (c *MemoryPressureCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.swapUsedDesc, prometheus.GaugeValue, total-free)
 		} else {
 			log.Warnf("memory pressure: SwapTotal/SwapFree missing from %s", c.meminfoPath)
-			collectionErrors++
+			errs++
 		}
 	}
 
-	ch <- prometheus.MustNewConstMetric(c.collectionErrorsDesc, prometheus.CounterValue, collectionErrors)
+	c.collectionErrors.Add(errs)
+	ch <- c.collectionErrors
 }
 
 func (c *MemoryPressureCollector) emitPSI(ch chan<- prometheus.Metric, stats *PSIStats) {

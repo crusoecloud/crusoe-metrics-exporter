@@ -115,7 +115,7 @@ full avg10=0.00 avg60=0.00 avg300=0.00 total=1000000
 		t.Errorf("swap_used_bytes: got %v, want %v", got, (2048000-1024000)*1024)
 	}
 
-	if got := mustFind(t, metrics, c.collectionErrorsDesc, nil); got != 0 {
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
 		t.Errorf("collection_errors: got %v, want 0", got)
 	}
 }
@@ -137,7 +137,7 @@ func TestMemoryPressure_PSIUnavailable(t *testing.T) {
 	if got := mustFind(t, metrics, c.memAvailableDesc, nil); got != 8192000*1024 {
 		t.Errorf("mem_available_bytes should still emit, got %v", got)
 	}
-	if got := mustFind(t, metrics, c.collectionErrorsDesc, nil); got != 0 {
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
 		t.Errorf("collection_errors: got %v, want 0 (PSI absent is not an error)", got)
 	}
 }
@@ -150,7 +150,7 @@ func TestMemoryPressure_MeminfoMissingIncrementsErrors(t *testing.T) {
 	)
 	metrics := collectMemMetrics(t, c)
 
-	if got := mustFind(t, metrics, c.collectionErrorsDesc, nil); got != 1 {
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 1 {
 		t.Errorf("collection_errors: got %v, want 1", got)
 	}
 	if n := countWithDesc(metrics, c.memAvailableDesc); n != 0 {
