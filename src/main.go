@@ -154,6 +154,13 @@ func main() {
 	registry.MustRegister(memPressureCollector)
 	log.Infof("Memory pressure collector enabled")
 
+	// I/O pressure collector (PSI I/O + procs_blocked). PSI is capability-gated
+	// inside the collector; procs_blocked from /proc/stat always emits.
+	ioPressureCollector := collectors.NewIOPressureCollector(
+		hostProcPath+"/pressure/io", hostProcPath+"/stat")
+	registry.MustRegister(ioPressureCollector)
+	log.Infof("I/O pressure collector enabled")
+
 	// NVMe controller collector — passthrough drives only; one-shot probe at
 	// startup decides whether to register (no passthrough → silent skip).
 	nvmeCollector := collectors.NewNVMeCollector()
