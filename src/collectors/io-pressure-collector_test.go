@@ -35,7 +35,6 @@ procs_running 2
 procs_blocked 3
 `
 
-
 func TestIOPressure_PSIPresent(t *testing.T) {
 	psi := `some avg10=10.00 avg60=20.00 avg300=30.00 total=2000000
 full avg10=0.00 avg60=0.00 avg300=0.00 total=1000000
@@ -46,14 +45,12 @@ full avg10=0.00 avg60=0.00 avg300=0.00 total=1000000
 	)
 	metrics := collectIOMetrics(t, c)
 
-
 	if n := countWithDesc(metrics, c.psiRatioDesc); n != 6 {
 		t.Errorf("expected 6 psi_io_ratio series, got %d", n)
 	}
 	if n := countWithDesc(metrics, c.psiStallSecondsDesc); n != 2 {
 		t.Errorf("expected 2 psi_io_stall_seconds_total series, got %d", n)
 	}
-
 
 	if got := mustFind(t, metrics, c.psiRatioDesc, map[string]string{"scope": "some", "window": "10"}); !approx(got, 0.10) {
 		t.Errorf("ratio{some,10}: got %v, want 0.10", got)
@@ -62,21 +59,18 @@ full avg10=0.00 avg60=0.00 avg300=0.00 total=1000000
 		t.Errorf("ratio{some,300}: got %v, want 0.30", got)
 	}
 
- 
 	if got := mustFind(t, metrics, c.psiStallSecondsDesc, map[string]string{"scope": "some"}); !approx(got, 2.0) {
 		t.Errorf("stall{some}: got %v, want 2.0", got)
 	}
-
 
 	if got := mustFind(t, metrics, c.procsBlockedDesc, nil); got != 3 {
 		t.Errorf("procs_blocked: got %v, want 3", got)
 	}
 
-	if got := mustFind(t, metrics, c.collectionErrorsDesc, nil); got != 0 {
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
 		t.Errorf("collection_errors: got %v, want 0", got)
 	}
 }
-
 
 func TestIOPressure_PSIUnavailable(t *testing.T) {
 	c := NewIOPressureCollector(
@@ -94,11 +88,10 @@ func TestIOPressure_PSIUnavailable(t *testing.T) {
 	if got := mustFind(t, metrics, c.procsBlockedDesc, nil); got != 3 {
 		t.Errorf("procs_blocked should still emit, got %v", got)
 	}
-	if got := mustFind(t, metrics, c.collectionErrorsDesc, nil); got != 0 {
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
 		t.Errorf("collection_errors: got %v, want 0 (PSI absent is not an error)", got)
 	}
 }
-
 
 func TestIOPressure_ProcStatMissingIncrementsErrors(t *testing.T) {
 	psi := "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
@@ -108,7 +101,7 @@ func TestIOPressure_ProcStatMissingIncrementsErrors(t *testing.T) {
 	)
 	metrics := collectIOMetrics(t, c)
 
-	if got := mustFind(t, metrics, c.collectionErrorsDesc, nil); got != 1 {
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 1 {
 		t.Errorf("collection_errors: got %v, want 1", got)
 	}
 	if n := countWithDesc(metrics, c.procsBlockedDesc); n != 0 {

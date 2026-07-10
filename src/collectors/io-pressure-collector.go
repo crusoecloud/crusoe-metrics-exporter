@@ -1,6 +1,5 @@
 package collectors
 
-
 import (
 	"bufio"
 	"metrics-exporter/src/log"
@@ -15,10 +14,10 @@ type IOPressureCollector struct {
 	psiIOPath    string
 	procStatPath string
 
-	psiRatioDesc         *prometheus.Desc
-	psiStallSecondsDesc  *prometheus.Desc
-	procsBlockedDesc     *prometheus.Desc
-	collectionErrorsDesc *prometheus.Desc
+	psiRatioDesc        *prometheus.Desc
+	psiStallSecondsDesc *prometheus.Desc
+	procsBlockedDesc    *prometheus.Desc
+	collectionErrors    prometheus.Counter
 }
 
 func NewIOPressureCollector(psiIOPath, procStatPath string) *IOPressureCollector {
@@ -40,11 +39,10 @@ func NewIOPressureCollector(psiIOPath, procStatPath string) *IOPressureCollector
 			"Number of tasks in uninterruptible sleep (D-state), from /proc/stat procs_blocked.",
 			nil, nil,
 		),
-		collectionErrorsDesc: prometheus.NewDesc(
-			MetricPrefix+"io_collection_errors_total",
-			"Total number of errors encountered during I/O pressure collection.",
-			nil, nil,
-		),
+		collectionErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: MetricPrefix + "io_collection_errors_total",
+			Help: "Total number of errors encountered during I/O pressure collection.",
+		}),
 	}
 }
 
@@ -52,17 +50,23 @@ func (c *IOPressureCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.psiRatioDesc
 	ch <- c.psiStallSecondsDesc
 	ch <- c.procsBlockedDesc
-	ch <- c.collectionErrorsDesc
+	c.collectionErrors.Describe(ch)
 }
 
 func (c *IOPressureCollector) Collect(ch chan<- prometheus.Metric) {
-	collectionErrors := 0.0
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("IOPressureCollector panic recovered: %v", r)
+		}
+	}()
+
+	errs := 0.0
 
 	stats, available, err := ParsePSI(c.psiIOPath)
 	switch {
 	case err != nil:
 		log.Warnf("io pressure: failed to parse %s: %v", c.psiIOPath, err)
-		collectionErrors++
+		errs++
 	case !available:
 		//psi not enabled publish none
 	default:
@@ -73,18 +77,19 @@ func (c *IOPressureCollector) Collect(ch chan<- prometheus.Metric) {
 	switch {
 	case err != nil:
 		log.Warnf("io pressure: failed to read %s: %v", c.procStatPath, err)
-		collectionErrors++
+		errs++
 	case !ok:
 		log.Warnf("io pressure: procs_blocked missing from %s", c.procStatPath)
-		collectionErrors++
+		errs++
 	default:
 		ch <- prometheus.MustNewConstMetric(c.procsBlockedDesc, prometheus.GaugeValue, blocked)
 	}
 
-	ch <- prometheus.MustNewConstMetric(c.collectionErrorsDesc, prometheus.CounterValue, collectionErrors)
+	c.collectionErrors.Add(errs)
+	ch <- c.collectionErrors
 }
 
-// reuses PSI windows form memory-pressure-collector 
+// reuses PSI windows form memory-pressure-collector
 func (c *IOPressureCollector) emitPSI(ch chan<- prometheus.Metric, stats *PSIStats) {
 	for _, s := range []struct {
 		name string
