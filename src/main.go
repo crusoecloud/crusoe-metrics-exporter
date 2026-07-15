@@ -161,6 +161,11 @@ func main() {
 	registry.MustRegister(ioPressureCollector)
 	log.Infof("I/O pressure collector enabled")
 
+	// CPU steal collector (steal seconds + procs_running from /proc/stat).
+	cpuStealCollector := collectors.NewCPUStealCollector(hostProcPath + "/stat")
+	registry.MustRegister(cpuStealCollector)
+	log.Infof("CPU steal collector enabled")
+
 	// NVMe controller collector — passthrough drives only; one-shot probe at
 	// startup decides whether to register (no passthrough → silent skip).
 	nvmeCollector := collectors.NewNVMeCollector()
