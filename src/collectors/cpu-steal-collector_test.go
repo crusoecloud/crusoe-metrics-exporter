@@ -2,6 +2,7 @@ package collectors
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -159,5 +160,27 @@ func TestCPUSteal_ErrorsAccumulate(t *testing.T) {
 
 	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 2 {
 		t.Errorf("collection_errors after two failing scrapes: got %v, want 2", got)
+	}
+}
+
+func TestCPUSteal_OversizedIntrLine(t *testing.T) {
+	// A real /proc/stat carries an intr line with one counter per IRQ vector,
+	// which can exceed the 64KB default scanner token. Because procs_running
+	// follows intr, an over-long line must not abort the scan and drop metrics.
+	bigIntr := "intr 0 " + strings.Repeat("1 ", 60000) // ~120KB, well over the 64KB default
+	stat := "cpu  100 0 50 1000 5 0 3 8 0 0\n" +
+		bigIntr + "\n" +
+		"procs_running 2\n"
+	c := NewCPUStealCollector(writeTempProcStat(t, stat))
+	metrics := collectCPUMetrics(t, c)
+
+	if got := mustFind(t, metrics, c.stealSecondsDesc, nil); !approx(got, 0.08) {
+		t.Errorf("steal should emit past a huge intr line, got %v", got)
+	}
+	if got := mustFind(t, metrics, c.procsRunningDesc, nil); got != 2 {
+		t.Errorf("procs_running (after intr) should still emit, got %v", got)
+	}
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
+		t.Errorf("collection_errors: got %v, want 0", got)
 	}
 }

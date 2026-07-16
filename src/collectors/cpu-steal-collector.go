@@ -1,11 +1,7 @@
 package collectors
 
 import (
-	"bufio"
 	"metrics-exporter/src/log"
-	"os"
-	"strconv"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -38,7 +34,7 @@ func NewCPUStealCollector(procStatPath string) *CPUStealCollector {
 			nil, nil,
 		),
 		collectionErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: MetricPrefix + "cpu_collection_errors_total",
+			Name: MetricPrefix + "cpu_steal_collection_errors_total",
 			Help: "Total number of errors encountered during CPU steal collection.",
 		}),
 	}
@@ -59,7 +55,7 @@ func (c *CPUStealCollector) Collect(ch chan<- prometheus.Metric) {
 
 	errs := 0.0
 
-	stat, err := parseCPUStat(c.procStatPath)
+	stat, err := readProcStat(c.procStatPath)
 	if err != nil {
 		log.Warnf("cpu steal: failed to read %s: %v", c.procStatPath, err)
 		errs++
@@ -84,50 +80,4 @@ func (c *CPUStealCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.collectionErrors.Add(errs)
 	ch <- c.collectionErrors
-}
-
-type cpuStat struct {
-	stealJiffies    float64
-	procsRunning    float64
-	hasSteal        bool
-	hasProcsRunning bool
-}
-
-func parseCPUStat(path string) (cpuStat, error) {
-	var out cpuStat
-
-	file, err := os.Open(path)
-	if err != nil {
-		return out, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		switch fields[0] {
-		case "cpu":
-			if len(fields) < 9 {
-				continue
-			}
-			// cpu  user nice system idle iowait irq softirq steal guest guest_nice — steal is fields[8].
-			// A malformed value is left as hasSteal=false so procs_running still emits; Collect counts it.
-			if v, perr := strconv.ParseFloat(fields[8], 64); perr == nil {
-				out.stealJiffies = v
-				out.hasSteal = true
-			}
-		case "procs_running":
-			if v, perr := strconv.ParseFloat(fields[1], 64); perr == nil {
-				out.procsRunning = v
-				out.hasProcsRunning = true
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return out, err
-	}
-	return out, nil
 }
