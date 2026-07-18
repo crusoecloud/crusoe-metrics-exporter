@@ -528,6 +528,8 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 		log.Warnf("failed to update NFS server IPs map: %v", err)
 	}
 
+	c.cleanupStaleLatencyEntries(allNFSIPs)
+
 	return nil
 }
 
@@ -696,6 +698,49 @@ func (c *NFSLatencyCollector) updateNFSServerIPsMap(mapping map[string]string) e
 
 	log.Infof("Updated eBPF NFS server IPs map with %d IPs (cleared %d stale slots)", index, 64-index)
 	return nil
+}
+
+// cleanupStaleLatencyEntries removes entries from nfs_latency_by_ip for IPs
+// that are no longer in the active NFS server set. This prevents stale entries
+// from being emitted under unknown-0 after a volume is unmounted.
+func (c *NFSLatencyCollector) cleanupStaleLatencyEntries(activeIPs map[string]bool) {
+	latencyMap := c.objs.Maps["nfs_latency_by_ip"]
+	if latencyMap == nil {
+		return
+	}
+
+	var key uint32
+	var value struct {
+		RequestCount    uint64
+		TotalLatency    uint64
+		Histogram       [HISTOGRAM_BUCKETS]uint64
+		RetransmitCount uint64
+	}
+
+	var staleKeys []uint32
+	iter := latencyMap.Iterate()
+	for iter.Next(&key, &value) {
+		ipStr := ipUint32ToString(key)
+		if !activeIPs[ipStr] {
+			staleKeys = append(staleKeys, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		log.Warnf("error iterating nfs_latency_by_ip during cleanup: %v", err)
+		return
+	}
+
+	for _, key := range staleKeys {
+		if err := latencyMap.Delete(&key); err != nil {
+			log.Warnf("failed to delete stale nfs_latency_by_ip entry for IP %s: %v", ipUint32ToString(key), err)
+		} else {
+			log.Infof("Removed stale nfs_latency_by_ip entry for IP %s", ipUint32ToString(key))
+		}
+	}
+
+	if len(staleKeys) > 0 {
+		log.Infof("Cleaned up %d stale entries from nfs_latency_by_ip", len(staleKeys))
+	}
 }
 
 // refreshMountsIfNeeded re-scans /proc/mounts for NFS server IPs and updates
