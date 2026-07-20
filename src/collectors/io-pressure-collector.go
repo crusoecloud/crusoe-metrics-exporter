@@ -1,11 +1,7 @@
 package collectors
 
 import (
-	"bufio"
 	"metrics-exporter/src/log"
-	"os"
-	"strconv"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -73,16 +69,16 @@ func (c *IOPressureCollector) Collect(ch chan<- prometheus.Metric) {
 		c.emitPSI(ch, stats)
 	}
 
-	blocked, ok, err := parseProcsBlocked(c.procStatPath)
+	stat, err := readProcStat(c.procStatPath)
 	switch {
 	case err != nil:
 		log.Warnf("io pressure: failed to read %s: %v", c.procStatPath, err)
 		errs++
-	case !ok:
-		log.Warnf("io pressure: procs_blocked missing from %s", c.procStatPath)
+	case !stat.hasProcsBlocked:
+		log.Warnf("io pressure: procs_blocked missing or unparseable in %s", c.procStatPath)
 		errs++
 	default:
-		ch <- prometheus.MustNewConstMetric(c.procsBlockedDesc, prometheus.GaugeValue, blocked)
+		ch <- prometheus.MustNewConstMetric(c.procsBlockedDesc, prometheus.GaugeValue, stat.procsBlocked)
 	}
 
 	c.collectionErrors.Add(errs)
@@ -107,28 +103,4 @@ func (c *IOPressureCollector) emitPSI(ch chan<- prometheus.Metric, stats *PSISta
 			c.psiStallSecondsDesc, prometheus.CounterValue, s.line.TotalSeconds, s.name,
 		)
 	}
-}
-
-func parseProcsBlocked(path string) (float64, bool, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, false, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 2 && fields[0] == "procs_blocked" {
-			v, err := strconv.ParseFloat(fields[1], 64)
-			if err != nil {
-				return 0, false, err
-			}
-			return v, true, nil
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, false, err
-	}
-	return 0, false, nil
 }
