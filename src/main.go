@@ -166,6 +166,16 @@ func main() {
 	registry.MustRegister(cpuStealCollector)
 	log.Infof("CPU steal collector enabled")
 
+	// Kernel soft-lockup collector (long-lived /dev/kmsg tailer). Reading
+	// /dev/kmsg needs CAP_SYSLOG; if it can't be opened, run without it.
+	softLockupCollector, err := collectors.NewSoftLockupCollector("/dev/kmsg")
+	if err != nil {
+		log.Warnf("Failed to create soft-lockup collector: %v (continuing without soft-lockup metrics)", err)
+	} else {
+		registry.MustRegister(softLockupCollector)
+		log.Infof("Kernel soft-lockup collector enabled")
+	}
+
 	// NVMe controller collector — passthrough drives only; one-shot probe at
 	// startup decides whether to register (no passthrough → silent skip).
 	nvmeCollector := collectors.NewNVMeCollector()
