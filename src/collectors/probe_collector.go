@@ -2,6 +2,7 @@ package collectors
 
 import (
 	"bufio"
+	"encoding/binary"
 	"math/rand"
 	"metrics-exporter/src/log"
 	"net"
@@ -275,6 +276,39 @@ func (p *ProbeCollector) runProbes() {
 	p.mu.Unlock()
 }
 
+// expandIPRange expands a remoteports= value into individual IP strings.
+// Supports a single IP ("1.2.3.4"), a hyphenated range ("1.2.3.4-1.2.3.19"),
+// or a comma-separated mix of both.
+func expandIPRange(val string) []string {
+	var result []string
+	for _, part := range strings.Split(val, ";") {
+		part = strings.TrimSpace(part)
+		if hyphen := strings.Index(part, "-"); hyphen > 0 {
+			startIP := net.ParseIP(part[:hyphen])
+			endIP := net.ParseIP(part[hyphen+1:])
+			if startIP == nil || endIP == nil {
+				continue
+			}
+			start4, end4 := startIP.To4(), endIP.To4()
+			if start4 == nil || end4 == nil {
+				continue
+			}
+			startN := binary.BigEndian.Uint32(start4)
+			endN := binary.BigEndian.Uint32(end4)
+			for n := startN; n <= endN; n++ {
+				b := make(net.IP, 4)
+				binary.BigEndian.PutUint32(b, n)
+				result = append(result, b.String())
+			}
+		} else if ip := net.ParseIP(part); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				result = append(result, v4.String())
+			}
+		}
+	}
+	return result
+}
+
 // discoverNFSIPs scans the host mounts file for NFS/NFS4 mount entries
 // and returns their server IPs.
 func (p *ProbeCollector) discoverNFSIPs() []string {
@@ -302,16 +336,25 @@ func (p *ProbeCollector) discoverNFSIPs() []string {
 			continue
 		}
 
-		// Extract IP from addr= mount option (fields[3] is the options column)
+		// Extract IPs from mount options (fields[3] is the options column).
+		// Prefer remoteports= (VAST multipath range) over addr= (single VIP).
 		if len(fields) >= 4 {
+			var remoteportsIPs []string
+			var addrIP string
 			for _, opt := range strings.Split(fields[3], ",") {
 				opt = strings.TrimSpace(opt)
-				if strings.HasPrefix(opt, "addr=") {
-					ip := strings.TrimPrefix(opt, "addr=")
-					if net.ParseIP(ip) != nil && !seen[ip] {
-						seen[ip] = true
-					}
+				if strings.HasPrefix(opt, "remoteports=") {
+					remoteportsIPs = expandIPRange(strings.TrimPrefix(opt, "remoteports="))
+				} else if strings.HasPrefix(opt, "addr=") {
+					addrIP = strings.TrimPrefix(opt, "addr=")
 				}
+			}
+			if len(remoteportsIPs) > 0 {
+				for _, ip := range remoteportsIPs {
+					seen[ip] = true
+				}
+			} else if addrIP != "" && net.ParseIP(addrIP) != nil {
+				seen[addrIP] = true
 			}
 		}
 
