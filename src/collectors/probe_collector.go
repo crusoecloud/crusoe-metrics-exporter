@@ -277,36 +277,35 @@ func (p *ProbeCollector) runProbes() {
 }
 
 // expandIPRange expands a remoteports= value into individual IP strings.
-// Supports a single IP ("1.2.3.4"), a hyphenated range ("1.2.3.4-1.2.3.19"),
-// or a comma-separated mix of both.
+// Supports a single IP ("1.2.3.4") or a hyphenated range ("1.2.3.4-1.2.3.19").
 func expandIPRange(val string) []string {
-	var result []string
-	for _, part := range strings.Split(val, ";") {
-		part = strings.TrimSpace(part)
-		if hyphen := strings.Index(part, "-"); hyphen > 0 {
-			startIP := net.ParseIP(part[:hyphen])
-			endIP := net.ParseIP(part[hyphen+1:])
-			if startIP == nil || endIP == nil {
-				continue
-			}
-			start4, end4 := startIP.To4(), endIP.To4()
-			if start4 == nil || end4 == nil {
-				continue
-			}
-			startN := binary.BigEndian.Uint32(start4)
-			endN := binary.BigEndian.Uint32(end4)
-			for n := startN; n <= endN; n++ {
-				b := make(net.IP, 4)
-				binary.BigEndian.PutUint32(b, n)
-				result = append(result, b.String())
-			}
-		} else if ip := net.ParseIP(part); ip != nil {
-			if v4 := ip.To4(); v4 != nil {
-				result = append(result, v4.String())
-			}
+	val = strings.TrimSpace(val)
+	if hyphen := strings.Index(val, "-"); hyphen > 0 {
+		startIP := net.ParseIP(val[:hyphen])
+		endIP := net.ParseIP(val[hyphen+1:])
+		if startIP == nil || endIP == nil {
+			return nil
+		}
+		start4, end4 := startIP.To4(), endIP.To4()
+		if start4 == nil || end4 == nil {
+			return nil
+		}
+		startN := binary.BigEndian.Uint32(start4)
+		endN := binary.BigEndian.Uint32(end4)
+		var result []string
+		for n := startN; n <= endN; n++ {
+			b := make(net.IP, 4)
+			binary.BigEndian.PutUint32(b, n)
+			result = append(result, b.String())
+		}
+		return result
+	}
+	if ip := net.ParseIP(val); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return []string{v4.String()}
 		}
 	}
-	return result
+	return nil
 }
 
 // discoverNFSIPs scans the host mounts file for NFS/NFS4 mount entries
