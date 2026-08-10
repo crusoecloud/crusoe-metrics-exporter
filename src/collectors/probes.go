@@ -33,7 +33,9 @@ func (p *ProbeCollector) probeICMPPing(ip string) probeResult {
 
 	_ = conn.SetDeadline(time.Now().Add(p.config.ProbeTimeout))
 
-	// Build Echo Request
+	// Use the PID as the ICMP ID to filter out replies from other processes
+	// on the same host. Concurrent goroutines within this process share the
+	// same PID/ID but are disambiguated by the peer IP check below.
 	id := os.Getpid() & 0xffff
 	msg := icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
@@ -75,13 +77,18 @@ func (p *ProbeCollector) probeICMPPing(ip string) probeResult {
 			continue
 		}
 
-		// Verify this reply is for our request
+		// Verify ID matches our request.
 		reply, ok := parsed.Body.(*icmp.Echo)
 		if !ok || reply.ID != id {
 			continue
 		}
 
-		_ = peer // peer should match dst
+		// Verify the reply came from the host we pinged, not a different
+		// host whose reply happened to land on this raw socket first.
+		if peerAddr, ok := peer.(*net.IPAddr); !ok || peerAddr.IP.String() != ip {
+			continue
+		}
+
 		return probeResult{IP: ip, Success: true, Latency: rtt}
 	}
 }
