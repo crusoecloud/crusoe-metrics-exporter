@@ -128,9 +128,11 @@ Measures NFS request latency using eBPF kprobes on `tcp_sendmsg` / `tcp_recvmsg`
 
 Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. Handles duplicate mount blocks for the same volume by deduplicating per volume ID.
 
+Tracks a fixed set of ops rather than every op in the per-op statistics section, to avoid exporting series for ops that are near-always-zero after mount: `read`, `write`, `getattr`, `lookup`, `access`, `create`, `remove`, `rename`, `commit`, `readdir`, `readdirplus`.
+
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `crusoe_vm_nfs_rpc_count_total` | Counter | `volume_id`, `nfs_operation` | Total RPC operations (read/write) |
+| `crusoe_vm_nfs_rpc_count_total` | Counter | `volume_id`, `nfs_operation` | Total RPC operations, per tracked op |
 | `crusoe_vm_nfs_rpc_timeouts_total` | Counter | `volume_id`, `nfs_operation` | Total RPC timeouts |
 | `crusoe_vm_nfs_rpc_rtt_ms_total` | Counter | `volume_id`, `nfs_operation` | Total RTT time (ms) |
 | `crusoe_vm_nfs_rpc_exe_ms_total` | Counter | `volume_id`, `nfs_operation` | Total execution time (ms) |

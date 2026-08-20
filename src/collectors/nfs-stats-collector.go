@@ -10,6 +10,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// trackedOps are the per-op mountstats lines we export RTT/exe/count/bytes
+// for. Kept deliberately narrower than the full NFSv3/v4 op set to avoid
+// exporting ops that are near-always-zero after mount (FSSTAT, FSINFO,
+// PATHCONF, NULL, READLINK, SYMLINK, MKNOD, RMDIR, LINK, SETATTR).
+var trackedOps = map[string]bool{
+	"READ:":        true,
+	"WRITE:":       true,
+	"GETATTR:":     true,
+	"LOOKUP:":      true,
+	"ACCESS:":      true,
+	"CREATE:":      true,
+	"REMOVE:":      true,
+	"RENAME:":      true,
+	"COMMIT:":      true,
+	"READDIR:":     true,
+	"READDIRPLUS:": true,
+}
+
 type NFSStatsCollector struct {
 	mountStatsPath   string
 	rpcCount         *prometheus.Desc
@@ -162,8 +180,8 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 
-		// Look for READ: or WRITE: lines
-		if (fields[0] == "READ:" || fields[0] == "WRITE:") && currentVolumeID != "" {
+		// Look for tracked per-op lines (READ:, WRITE:, GETATTR:, ...)
+		if trackedOps[fields[0]] && currentVolumeID != "" {
 			if len(fields) < 10 {
 				continue
 			}
