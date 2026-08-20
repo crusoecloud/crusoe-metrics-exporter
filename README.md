@@ -128,6 +128,8 @@ Measures NFS request latency using eBPF kprobes on `tcp_sendmsg` / `tcp_recvmsg`
 
 Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. Handles duplicate mount blocks for the same volume by deduplicating per volume ID.
 
+Tracked ops are exported even when their op count is zero: an absent counter cannot be told apart from an uninstrumented one, and it breaks `rate()`.
+
 Tracks a fixed set of ops rather than every op in the per-op statistics section, to avoid exporting series for ops that are near-always-zero after mount: `read`, `write`, `getattr`, `lookup`, `access`, `create`, `remove`, `rename`, `commit`, `readdir`, `readdirplus`.
 
 | Metric | Type | Labels | Description |
@@ -136,6 +138,7 @@ Tracks a fixed set of ops rather than every op in the per-op statistics section,
 | `crusoe_vm_nfs_rpc_timeouts_total` | Counter | `volume_id`, `nfs_operation` | Total RPC timeouts |
 | `crusoe_vm_nfs_rpc_rtt_ms_total` | Counter | `volume_id`, `nfs_operation` | Total RTT time (ms) |
 | `crusoe_vm_nfs_rpc_exe_ms_total` | Counter | `volume_id`, `nfs_operation` | Total execution time (ms) |
+| `crusoe_vm_nfs_rpc_queue_ms_total` | Counter | `volume_id`, `nfs_operation` | Total time queued on this host before transmission (ms). `execute - queue - rtt` is post-reply client time. |
 | `crusoe_vm_nfs_rpc_backlog` | Counter | `volume_id` | RPC backlog utilization (`bklog_u` from `xprt: tcp`) |
 | `crusoe_vm_nfs_bytes_sent_total` | Counter | `volume_id`, `nfs_operation` | Total bytes sent (from mountstats) |
 | `crusoe_vm_nfs_bytes_recv_total` | Counter | `volume_id`, `nfs_operation` | Total bytes received (from mountstats) |

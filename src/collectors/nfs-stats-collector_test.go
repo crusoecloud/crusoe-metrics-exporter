@@ -16,9 +16,9 @@ func TestNFSStatsCollectorDescribe(t *testing.T) {
 	for range ch {
 		got++
 	}
-	// rpcCount, rpcTimeouts, rpcRttMs, rpcExeMs, bytesSent, bytesRecv,
-	// backlog, collectionErrors = 8
-	want := 8
+	// rpcCount, rpcTimeouts, rpcRttMs, rpcExeMs, rpcQueueMs, bytesSent,
+	// bytesRecv, backlog, collectionErrors = 9
+	want := 9
 	if got != want {
 		t.Errorf("Describe emitted %d descriptors, want %d", got, want)
 	}
@@ -149,6 +149,43 @@ func TestNFSStatsCollector_MalformedLineSkipped(t *testing.T) {
 	}
 }
 
+// TestNFSStatsCollector_QueueTime pins the per-op queue field (mountstats
+// index 6) to its own metric, and pins the field ordering: queue, rtt, exe are
+// fields 6, 7, 8, so a shifted read would silently report the wrong number.
+func TestNFSStatsCollector_QueueTime(t *testing.T) {
+	// Per-op line format: OP: ops trans maj_to bytes_sent bytes_recv queue rtt exe errors
+	// queue=600, rtt=70, exe=800 -> deliberately distinct so a field shift fails.
+	fixture := "device 10.0.0.1:/volumes/vol-queue mounted on /mnt/q with fstype nfs statvers=1.1\n" +
+		"\txprt:\ttcp 0 0 1 0 0 100 100 0 0 0 2 0 0\n" +
+		"\tper-op statistics\n" +
+		"\tWRITE: 10 10 0 1000 1000 600 70 800 0\n"
+
+	path := writeMountstats(t, fixture)
+	metrics := collectMetrics(t, NewNFSStatsCollector(path))
+
+	want := map[string]float64{
+		"crusoe_vm_nfs_rpc_queue_ms_total": 600,
+		"crusoe_vm_nfs_rpc_rtt_ms_total":   70,
+		"crusoe_vm_nfs_rpc_exe_ms_total":   800,
+	}
+	got := map[string]float64{}
+	for _, m := range metrics {
+		if _, tracked := want[fqName(m)]; tracked && metricLabels(m)["nfs_operation"] == "write" {
+			got[fqName(m)] = metricValue(m)
+		}
+	}
+	for name, w := range want {
+		v, ok := got[name]
+		if !ok {
+			t.Errorf("%s{nfs_operation=\"write\"} not emitted", name)
+			continue
+		}
+		if v != w {
+			t.Errorf("%s = %v, want %v (field-order regression?)", name, v, w)
+		}
+	}
+}
+
 func TestNFSStatsCollector_MissingFile_GracefulError(t *testing.T) {
 	c := NewNFSStatsCollector("/nonexistent/path/that/does/not/exist")
 	metrics := collectMetrics(t, c)
@@ -206,12 +243,17 @@ func TestNFSStatsCollector_GoldenFixture_NconnectMount(t *testing.T) {
 		}
 	}
 
-	// Zero-ops tracked ops (remove, rename, commit, readdir, readdirplus)
-	// are skipped, matching the existing zero-ops-skip behavior for
-	// read/write (nfs-stats-collector.go).
+	// Tracked ops with ops=0 are still exported, as zero. An absent counter
+	// cannot be distinguished from an uninstrumented one, breaks rate(), and
+	// makes "idle" and "not collected" look identical to an alert.
 	for _, op := range []string{"remove", "rename", "commit", "readdir", "readdirplus"} {
-		if _, ok := gotOps[op]; ok {
-			t.Errorf("op %q has ops=0 in the fixture and should be skipped, but a series was emitted", op)
+		got, ok := gotOps[op]
+		if !ok {
+			t.Errorf("op %q has ops=0 in the fixture and must still be exported as 0, but no series was emitted", op)
+			continue
+		}
+		if got != 0 {
+			t.Errorf("nfs_rpc_count_total{nfs_operation=%q} = %v, want 0", op, got)
 		}
 	}
 
@@ -265,11 +307,19 @@ func TestNFSStatsCollector_GoldenFixture_SharedVolumeManyMounts(t *testing.T) {
 	}
 
 	// read/getattr are zero across all 463 blocks in this fixture (the
-	// batch job hadn't started actual data access at capture time) and
-	// should be skipped like any other zero-ops line.
+	// batch job hadn't started actual data access at capture time) and must
+	// still be exported as 0, deduped to one series like any other op.
 	for _, op := range []string{"read", "getattr"} {
-		if _, ok := gotOps[op]; ok {
-			t.Errorf("op %q has ops=0 across all 463 blocks in the fixture and should be skipped, but a series was emitted", op)
+		got, ok := gotOps[op]
+		if !ok {
+			t.Errorf("op %q is zero across all 463 blocks and must still be exported as 0, but no series was emitted", op)
+			continue
+		}
+		if got != 0 {
+			t.Errorf("nfs_rpc_count_total{nfs_operation=%q} = %v, want 0", op, got)
+		}
+		if seriesCount[op] != 1 {
+			t.Errorf("nfs_operation=%q: got %d series across 463 mount blocks, want exactly 1", op, seriesCount[op])
 		}
 	}
 

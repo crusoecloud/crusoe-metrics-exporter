@@ -34,6 +34,7 @@ type NFSStatsCollector struct {
 	rpcTimeouts      *prometheus.Desc
 	rpcRttMs         *prometheus.Desc
 	rpcExeMs         *prometheus.Desc
+	rpcQueueMs       *prometheus.Desc
 	bytesSent        *prometheus.Desc
 	bytesRecv        *prometheus.Desc
 	backlog          *prometheus.Desc
@@ -67,6 +68,11 @@ func NewNFSStatsCollector(mountStatsPath string) *NFSStatsCollector {
 			[]string{"volume_id", "nfs_operation"},
 			nil,
 		),
+		rpcQueueMs: prometheus.NewDesc(
+			MetricPrefix + "nfs_rpc_queue_ms_total",
+			"Cumulative time RPCs of this op spent queued on this host before transmission (mountstats per-op 'queue', ms). Divide by nfs_rpc_count_total for mean local wait; execute - queue - rtt is post-reply client time.",
+			[]string{"volume_id", "nfs_operation"}, nil,
+		),
 		bytesSent: prometheus.NewDesc(
 			MetricPrefix+"nfs_bytes_sent_total",
 			"Total bytes sent for NFS RPC operations",
@@ -99,6 +105,7 @@ func (c *NFSStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.rpcTimeouts
 	ch <- c.rpcRttMs
 	ch <- c.rpcExeMs
+	ch <- c.rpcQueueMs
 	ch <- c.bytesSent
 	ch <- c.bytesRecv
 	ch <- c.backlog
@@ -133,6 +140,7 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 		timeouts  float64
 		rtt       float64
 		exe       float64
+		queue     float64
 		bytesSent float64
 		bytesRecv float64
 	}
@@ -192,9 +200,6 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 				errorCount++
 				continue
 			}
-			if opsCount == 0 {
-				continue
-			}
 
 			opType := strings.ToLower(strings.TrimSuffix(fields[0], ":"))
 
@@ -216,6 +221,13 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 			exeTime, err := strconv.ParseFloat(fields[8], 64)
 			if err != nil {
 				log.Warnf("Error parsing execute time: %v", err)
+				errorCount++
+				continue
+			}
+
+			queueTime, err := strconv.ParseFloat(fields[6], 64)
+			if err != nil {
+				log.Warnf("Error parsing queue time: %v", err)
 				errorCount++
 				continue
 			}
@@ -242,6 +254,9 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 				if exeTime > existing.exe {
 					existing.exe = exeTime
 				}
+				if queueTime > existing.queue {
+					existing.queue = queueTime
+				}
 				if bytesSent > existing.bytesSent {
 					existing.bytesSent = bytesSent
 				}
@@ -249,7 +264,7 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 					existing.bytesRecv = bytesRecv
 				}
 			} else {
-				rpcAccum[key] = &rpcStats{ops: opsCount, timeouts: timeouts, rtt: rttTime, exe: exeTime, bytesSent: bytesSent, bytesRecv: bytesRecv}
+				rpcAccum[key] = &rpcStats{ops: opsCount, timeouts: timeouts, rtt: rttTime, exe: exeTime, queue: queueTime, bytesSent: bytesSent, bytesRecv: bytesRecv}
 			}
 		}
 	}
@@ -265,6 +280,7 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.rpcTimeouts, prometheus.CounterValue, stats.timeouts, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.rpcRttMs, prometheus.CounterValue, stats.rtt, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.rpcExeMs, prometheus.CounterValue, stats.exe, key.volumeID, key.operation)
+		ch <- prometheus.MustNewConstMetric(c.rpcQueueMs, prometheus.CounterValue, stats.queue, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.bytesSent, prometheus.CounterValue, stats.bytesSent, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.bytesRecv, prometheus.CounterValue, stats.bytesRecv, key.volumeID, key.operation)
 	}
