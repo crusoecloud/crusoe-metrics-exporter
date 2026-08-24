@@ -25,6 +25,7 @@ func TestCPUSteal_HappyPath(t *testing.T) {
 	// so a regression that read a per-cpu line instead of the aggregate is caught.
 	stat := `cpu  100 0 50 1000 5 0 3 8 0 0
 cpu0 60 0 30 500 3 0 2 99 0 0
+cpu1 40 0 20 500 2 0 1 0 0 0
 procs_running 2
 procs_blocked 3
 `
@@ -36,6 +37,9 @@ procs_blocked 3
 	}
 	if got := mustFind(t, metrics, c.procsRunningDesc, nil); got != 2 {
 		t.Errorf("procs_running: got %v, want 2", got)
+	}
+	if got := mustFind(t, metrics, c.cpuCountDesc, nil); got != 2 {
+		t.Errorf("cpu_count: got %v, want 2 (cpu0 and cpu1, not the aggregate line)", got)
 	}
 	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
 		t.Errorf("collection_errors: got %v, want 0", got)
@@ -55,10 +59,14 @@ func TestCPUSteal_StatMissing(t *testing.T) {
 	if n := countWithDesc(metrics, c.procsRunningDesc); n != 0 {
 		t.Errorf("procs_running should be absent when stat unreadable, got %d", n)
 	}
+	if n := countWithDesc(metrics, c.cpuCountDesc); n != 0 {
+		t.Errorf("cpu_count should be absent when stat unreadable, got %d", n)
+	}
 }
 
 func TestCPUSteal_NoStealColumn(t *testing.T) {
 	stat := `cpu  100 0 50 1000
+cpu0 100 0 50 1000
 procs_running 4
 `
 	c := NewCPUStealCollector(writeTempProcStat(t, stat))
@@ -77,6 +85,7 @@ procs_running 4
 func TestCPUSteal_NoProcsRunning(t *testing.T) {
 	// Mirror of TestCPUSteal_NoStealColumn: steal present, procs_running line absent.
 	stat := `cpu  100 0 50 1000 5 0 3 8 0 0
+cpu0 100 0 50 1000 5 0 3 8 0 0
 procs_blocked 1
 `
 	c := NewCPUStealCollector(writeTempProcStat(t, stat))
@@ -97,6 +106,7 @@ func TestCPUSteal_MalformedSteal(t *testing.T) {
 	// A malformed steal value is treated like a missing column: steal is dropped
 	// and counted, but a valid procs_running on another line still emits.
 	stat := `cpu  100 0 50 1000 5 0 3 notanumber 0 0
+cpu0 100 0 50 1000 5 0 3 0 0 0
 procs_running 5
 `
 	c := NewCPUStealCollector(writeTempProcStat(t, stat))
@@ -117,6 +127,7 @@ func TestCPUSteal_MalformedProcsRunning(t *testing.T) {
 	// Symmetric to the malformed-steal case: a bad procs_running value must not
 	// discard the valid steal reading.
 	stat := `cpu  100 0 50 1000 5 0 3 8 0 0
+cpu0 100 0 50 1000 5 0 3 8 0 0
 procs_running notanumber
 `
 	c := NewCPUStealCollector(writeTempProcStat(t, stat))
@@ -133,9 +144,10 @@ procs_running notanumber
 	}
 }
 
-func TestCPUSteal_BothFieldsMissing(t *testing.T) {
-	// A readable /proc/stat missing both fields increments the error counter
-	// once per missing field (2), not once for the file.
+func TestCPUSteal_AllFieldsMissing(t *testing.T) {
+	// A readable /proc/stat missing every field increments the error counter
+	// once per missing field (steal, procs_running, cpu count = 3), not once
+	// for the file.
 	stat := `intr 12345 0 0
 procs_blocked 0
 `
@@ -148,8 +160,11 @@ procs_blocked 0
 	if n := countWithDesc(metrics, c.procsRunningDesc); n != 0 {
 		t.Errorf("procs_running series should be absent, got %d", n)
 	}
-	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 2 {
-		t.Errorf("collection_errors: got %v, want 2 (one per missing field)", got)
+	if n := countWithDesc(metrics, c.cpuCountDesc); n != 0 {
+		t.Errorf("cpu_count series should be absent, got %d", n)
+	}
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 3 {
+		t.Errorf("collection_errors: got %v, want 3 (one per missing field)", got)
 	}
 }
 
@@ -163,12 +178,36 @@ func TestCPUSteal_ErrorsAccumulate(t *testing.T) {
 	}
 }
 
+func TestCPUSteal_CPUCount(t *testing.T) {
+	// cpu_count counts only real per-cpu lines: the aggregate "cpu" line and
+	// other "cpu"-prefixed non-numeric tokens must not inflate it, and the
+	// count follows the number of cpuN lines, not any of their values.
+	stat := `cpu  400 0 200 4000 20 0 12 32 0 0
+cpu0 100 0 50 1000 5 0 3 8 0 0
+cpu1 100 0 50 1000 5 0 3 8 0 0
+cpu2 100 0 50 1000 5 0 3 8 0 0
+cpu3 100 0 50 1000 5 0 3 8 0 0
+cpuidle 12345
+procs_running 1
+`
+	c := NewCPUStealCollector(writeTempProcStat(t, stat))
+	metrics := collectCPUMetrics(t, c)
+
+	if got := mustFind(t, metrics, c.cpuCountDesc, nil); got != 4 {
+		t.Errorf("cpu_count: got %v, want 4", got)
+	}
+	if got := mustFind(t, metrics, c.collectionErrors.Desc(), nil); got != 0 {
+		t.Errorf("collection_errors: got %v, want 0", got)
+	}
+}
+
 func TestCPUSteal_OversizedIntrLine(t *testing.T) {
 	// A real /proc/stat carries an intr line with one counter per IRQ vector,
 	// which can exceed the 64KB default scanner token. Because procs_running
 	// follows intr, an over-long line must not abort the scan and drop metrics.
 	bigIntr := "intr 0 " + strings.Repeat("1 ", 60000) // ~120KB, well over the 64KB default
 	stat := "cpu  100 0 50 1000 5 0 3 8 0 0\n" +
+		"cpu0 100 0 50 1000 5 0 3 8 0 0\n" +
 		bigIntr + "\n" +
 		"procs_running 2\n"
 	c := NewCPUStealCollector(writeTempProcStat(t, stat))
