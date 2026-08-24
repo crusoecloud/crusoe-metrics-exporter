@@ -17,6 +17,7 @@ type CPUStealCollector struct {
 
 	stealSecondsDesc *prometheus.Desc
 	procsRunningDesc *prometheus.Desc
+	cpuCountDesc     *prometheus.Desc
 	collectionErrors prometheus.Counter
 }
 
@@ -33,6 +34,11 @@ func NewCPUStealCollector(procStatPath string) *CPUStealCollector {
 			"Number of runnable (R-state) tasks, from /proc/stat procs_running.",
 			nil, nil,
 		),
+		cpuCountDesc: prometheus.NewDesc(
+			MetricPrefix+"cpu_count",
+			"Number of online vCPUs, counted from the per-cpu lines in /proc/stat. Divides cpu_steal_seconds_total into a fraction of the VM's compute.",
+			nil, nil,
+		),
 		collectionErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: MetricPrefix + "cpu_steal_collection_errors_total",
 			Help: "Total number of errors encountered during CPU steal collection.",
@@ -43,6 +49,7 @@ func NewCPUStealCollector(procStatPath string) *CPUStealCollector {
 func (c *CPUStealCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.stealSecondsDesc
 	ch <- c.procsRunningDesc
+	ch <- c.cpuCountDesc
 	c.collectionErrors.Describe(ch)
 }
 
@@ -74,6 +81,14 @@ func (c *CPUStealCollector) Collect(ch chan<- prometheus.Metric) {
 			)
 		} else {
 			log.Warnf("cpu steal: procs_running missing or unparseable in %s", c.procStatPath)
+			errs++
+		}
+		if stat.cpuCount > 0 {
+			ch <- prometheus.MustNewConstMetric(
+				c.cpuCountDesc, prometheus.GaugeValue, stat.cpuCount,
+			)
+		} else {
+			log.Warnf("cpu steal: no per-cpu lines found in %s", c.procStatPath)
 			errs++
 		}
 	}

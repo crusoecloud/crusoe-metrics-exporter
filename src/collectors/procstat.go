@@ -10,11 +10,13 @@ import (
 // procStatValues holds the /proc/stat fields consumed by the guest-health
 // collectors. Each has* flag is false when its line is absent or its value is
 // unparseable; the error return is reserved for I/O failures, so one bad field
-// never discards the others.
+// never discards the others. cpuCount is the number of per-cpu ("cpuN") lines
+// seen — zero means none were present.
 type procStatValues struct {
 	stealJiffies float64
 	procsRunning float64
 	procsBlocked float64
+	cpuCount     float64
 
 	hasSteal        bool
 	hasProcsRunning bool
@@ -63,6 +65,11 @@ func readProcStat(path string) (procStatValues, error) {
 			if v, perr := strconv.ParseFloat(fields[1], 64); perr == nil {
 				out.procsBlocked = v
 				out.hasProcsBlocked = true
+			}
+		default:
+			// Per-cpu lines are "cpuN ..." (cpu0, cpu1, ...); one per online vCPU.
+			if strings.HasPrefix(fields[0], "cpu") && len(fields[0]) > 3 && fields[0][3] >= '0' && fields[0][3] <= '9' {
+				out.cpuCount++
 			}
 		}
 	}
