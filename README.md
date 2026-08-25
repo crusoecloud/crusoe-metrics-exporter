@@ -1,10 +1,11 @@
 # Crusoe Metrics Exporter
 
-A Prometheus-compatible metrics exporter for Crusoe VMs. Collects disk I/O, NFS, object store, and NVMe controller health metrics using a combination of eBPF kernel probes, procfs/mountstats parsing, and NVMe admin commands.
+A Prometheus-compatible metrics exporter for Crusoe VMs. Collects guest health signals (CPU steal, memory and I/O pressure, kernel soft lockups) alongside disk I/O, NFS, object store, and NVMe controller health metrics, using a combination of eBPF kernel probes, procfs/PSI/mountstats parsing, kernel-log tailing, and NVMe admin commands.
 
 ## Features
 
 - **eBPF-based latency collection** -- kprobes on `tcp_sendmsg`, `tcp_recvmsg`, `tcp_retransmit_skb`, and block I/O tracepoints for high-fidelity, low-overhead measurements
+- **Guest health signals** -- CPU steal normalized by vCPU count, PSI memory/I/O pressure, and kernel soft-lockup detection, for diagnosing problems the host's own metrics cannot see from outside the guest
 - **Histogram metrics** -- geometric bucket distributions for disk, NFS, and object store latency
 - **TCP retransmit counters** -- per-destination retransmit tracking for NFS and object store as an availability signal
 - **NFS mountstats parsing** -- RPC counts, RTT, execution time, timeouts, backlog, per-`nconnect`-lane (xprt) state, and per-mount VFS/event counters from `/proc/1/mountstats`
@@ -228,6 +229,61 @@ Measures object store (S3-compatible) connection-level latency, byte throughput,
 | `crusoe_vm_objectstore_bytes_recv_total` | Counter | `endpoint` | Total bytes received from object store |
 | `crusoe_vm_objectstore_connection_latency_histogram_seconds` | Histogram | `endpoint` | Connection-phase latency histogram (20 geometric buckets, 1ms--1000ms) |
 
+### CPU Steal Collector (procfs)
+
+**Source:** `src/collectors/cpu-steal-collector.go`
+
+Reads the aggregate `cpu` line and the per-cpu (`cpuN`) lines from `HOST_PROC_PATH/stat`. **Steal** is time the guest's vCPUs were runnable but not scheduled by the hypervisor -- on a fleet with pinned CPUs it should sit near zero, so sustained steal points at host-side contention or a placement misconfiguration rather than guest load. Jiffies are converted to seconds using the procfs ABI's fixed `USER_HZ` of 100.
+
+`crusoe_vm_cpu_count` is the denominator that makes steal comparable across instance sizes: `rate(cpu_steal_seconds_total[5m]) / cpu_count` is the fraction of the VM's compute being withheld, which is the form worth alerting on.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_cpu_steal_seconds_total` | Counter | - | Cumulative vCPU-seconds withheld by the hypervisor, summed across vCPUs |
+| `crusoe_vm_cpu_count` | Gauge | - | Online vCPUs, counted from the per-cpu lines in `/proc/stat` |
+| `crusoe_vm_procs_running` | Gauge | - | Runnable (R-state) tasks -- steal only hurts when this is non-zero |
+| `crusoe_vm_cpu_steal_collection_errors_total` | Counter | - | Collection errors (one per missing or unparseable field) |
+
+### Memory Pressure Collector (PSI)
+
+**Source:** `src/collectors/memory-pressure-collector.go`
+
+Parses Linux Pressure Stall Information from `HOST_PROC_PATH/pressure/memory`, plus `MemAvailable` / `SwapTotal` / `SwapFree` from `HOST_PROC_PATH/meminfo`. `scope="some"` is the fraction of the window in which *at least one* task was stalled on memory (contention, but the VM is still making progress); `scope="full"` is the fraction in which *all* non-idle tasks were stalled at once (the VM is thrashing). Publishes nothing when the kernel lacks PSI support.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_psi_memory_ratio` | Gauge | `scope`, `window` | Stalled fraction (0--1) of the rolling window; `scope` is `some`/`full`, `window` is `10`/`60`/`300` seconds |
+| `crusoe_vm_psi_memory_stall_seconds_total` | Counter | `scope` | Cumulative time tasks were stalled waiting on memory |
+| `crusoe_vm_mem_available_bytes` | Gauge | - | Memory available for new allocations without swapping (`MemAvailable`) |
+| `crusoe_vm_swap_used_bytes` | Gauge | - | Swap currently in use (`SwapTotal - SwapFree`) |
+| `crusoe_vm_mem_collection_errors_total` | Counter | - | Collection errors |
+
+### I/O Pressure Collector (PSI)
+
+**Source:** `src/collectors/io-pressure-collector.go`
+
+Same PSI scopes and windows as the memory collector, read from `HOST_PROC_PATH/pressure/io`, plus `procs_blocked` from `HOST_PROC_PATH/stat`. On I/O-heavy fleets a high `some` value is normal -- workloads streaming datasets or writing checkpoints spend real time waiting on disk -- so `full` is the signal that a VM is choked rather than merely busy.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_psi_io_ratio` | Gauge | `scope`, `window` | Stalled fraction (0--1) of the rolling window; `scope` is `some`/`full`, `window` is `10`/`60`/`300` seconds |
+| `crusoe_vm_psi_io_stall_seconds_total` | Counter | `scope` | Cumulative time tasks were stalled waiting on I/O |
+| `crusoe_vm_procs_blocked` | Gauge | - | Tasks in uninterruptible sleep (D-state), almost always waiting on I/O |
+| `crusoe_vm_io_collection_errors_total` | Counter | - | Collection errors |
+
+### Kernel Soft Lockup Collector (kmsg)
+
+**Source:** `src/collectors/soft-lockup-collector.go`
+
+A soft lockup is a CPU stuck in kernel mode for 20+ seconds without yielding. Unlike the other collectors this is an *event* in the kernel log rather than a value readable at scrape time, so a long-lived goroutine tails `/dev/kmsg` for the life of the process and increments a counter whenever the watchdog reports one; `Collect()` just emits the current totals.
+
+Requires `CAP_SYSLOG` (or root, or `kernel.dmesg_restrict=0`) and a `/dev/kmsg` mount -- without them the collector logs a warning and disables itself so the exporter still starts. The tailer seeks to the end of the ring buffer at startup, so a restart never re-counts historical lockups and injects a phantom `rate()` spike, and it treats `EPIPE` as a recoverable overflow. Each watchdog *report* counts: a CPU that stays stuck is re-reported roughly every 20 seconds, so one prolonged episode increments the counter more than once. Hard-lockup detection is out of scope -- it relies on the NMI watchdog, typically unavailable in cloud VMs.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_kernel_soft_lockups_total` | Counter | - | Soft-lockup reports observed in `/dev/kmsg` since the exporter started |
+| `crusoe_vm_kernel_soft_lockup_collection_errors_total` | Counter | - | Errors while tailing `/dev/kmsg`, including ring-buffer overflows |
+
 ### PromQL Examples
 
 ```promql
@@ -274,6 +330,23 @@ crusoe_vm_nvme_percentage_used >= 90
 
 # NVMe media error rate
 rate(crusoe_vm_nvme_media_errors_total[1h])
+# CPU steal as a fraction of the VM's compute (comparable across instance sizes)
+rate(crusoe_vm_cpu_steal_seconds_total[5m]) / crusoe_vm_cpu_count
+
+# Share of the fleet losing more than 5% of its compute to steal
+count(rate(crusoe_vm_cpu_steal_seconds_total[5m]) / crusoe_vm_cpu_count > 0.05)
+  / count(crusoe_vm_cpu_count)
+
+# Fleet distribution of memory pressure (p50/p99 over the 60s window)
+quantile(0.50, crusoe_vm_psi_memory_ratio{scope="some", window="60"})
+quantile(0.99, crusoe_vm_psi_memory_ratio{scope="some", window="60"})
+
+# VMs fully stalled on I/O -- all non-idle tasks blocked, not merely busy
+crusoe_vm_psi_io_ratio{scope="full", window="60"} > 0.1
+
+# Soft-lockup reports per hour across the fleet
+sum(increase(crusoe_vm_kernel_soft_lockups_total[1h]))
+
 ```
 
 ---
