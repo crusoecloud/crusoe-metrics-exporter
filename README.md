@@ -131,12 +131,14 @@ Parses `/proc/1/mountstats` for NFS RPC statistics and transport-level backlog. 
 
 Tracked ops are exported even when their op count is zero: an absent counter cannot be told apart from an uninstrumented one, and it breaks `rate()`.
 
-Tracks a fixed set of ops rather than every op in the per-op statistics section, to avoid exporting series for ops that are near-always-zero after mount: `read`, `write`, `getattr`, `lookup`, `access`, `create`, `remove`, `rename`, `commit`, `readdir`, `readdirplus`.
+Tracks a fixed set of ops rather than every op in the per-op statistics section, to avoid exporting series for ops that are near-always-zero after mount: `read`, `write`, `getattr`, `lookup`, `access`, `create`, `remove`, `rename`, `commit`, `readdir`, `readdirplus`, plus the mount-time RPCs `null`, `fsstat`, `fsinfo`, `pathconf`. Those four are near-always-zero after mount but are the RPCs that `mount()` itself issues, so they give visibility into mount-time RPC behavior.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `crusoe_vm_nfs_rpc_count_total` | Counter | `volume_id`, `nfs_operation` | Total RPC operations, per tracked op |
-| `crusoe_vm_nfs_rpc_timeouts_total` | Counter | `volume_id`, `nfs_operation` | Total RPC timeouts |
+| `crusoe_vm_nfs_rpc_timeouts_total` | Counter | `volume_id`, `nfs_operation` | Total RPC major timeouts |
+| `crusoe_vm_nfs_rpc_retransmits_total` | Counter | `volume_id`, `nfs_operation` | RPC retransmissions (`trans - ops`): requests sent again because no reply arrived. |
+| `crusoe_vm_nfs_rpc_errors_total` | Counter | `volume_id`, `nfs_operation` | RPCs that completed with an error status. |
 | `crusoe_vm_nfs_rpc_rtt_ms_total` | Counter | `volume_id`, `nfs_operation` | Total RTT time (ms) |
 | `crusoe_vm_nfs_rpc_exe_ms_total` | Counter | `volume_id`, `nfs_operation` | Total execution time (ms) |
 | `crusoe_vm_nfs_rpc_queue_ms_total` | Counter | `volume_id`, `nfs_operation` | Total time queued on this host before transmission (ms). `execute - queue - rtt` is post-reply client time. |
@@ -162,6 +164,8 @@ Parses the per-`xprt:` lines from `/proc/1/mountstats` and emits one series per 
 | `crusoe_vm_nfs_xprt_max_slots` | Gauge | `volume_id`, `xprt_idx` | High-water mark of slot table size. Stuck at 2 (kernel default) with no traffic indicates a lane that was never used. |
 | `crusoe_vm_nfs_xprt_idle_seconds` | Gauge | `volume_id`, `xprt_idx` | Seconds since the last activity on this xprt. |
 | `crusoe_vm_nfs_xprt_backlog_utilization` | Counter | `volume_id`, `xprt_idx` | Cumulative per-xprt backlog utilization (`bklog_u`). Per-lane breakdown of what NFS Stats Collector aggregates as `nfs_rpc_backlog`. |
+| `crusoe_vm_nfs_xprt_sending_utilization` | Counter | `volume_id`, `xprt_idx` | Cumulative sending-queue occupancy (`sending_u`): RPCs that hold a slot and are being transmitted. Compare with backlog (waiting for a slot) and pending (waiting for a reply). |
+| `crusoe_vm_nfs_xprt_pending_utilization` | Counter | `volume_id`, `xprt_idx` | Cumulative pending-queue occupancy (`pending_u`): RPCs sent and waiting for the server's reply. |
 | `crusoe_vm_nfs_xprt_stats_collection_errors_total` | Counter | - | Collection errors. |
 
 ### NFS Mount Events Collector (mountstats)
@@ -174,6 +178,7 @@ Parses the per-mount `events:`, `bytes:`, and `age:` lines from `/proc/1/mountst
 |--------|------|--------|-------------|
 | `crusoe_vm_nfs_mount_age_seconds` | Gauge | `volume_id` | Seconds since the NFS mount was established. Drops to a small value when the mount is recreated. |
 | `crusoe_vm_nfs_mount_congestion_wait_events_total` | Counter | `volume_id` | Client-side BDI writeback congestion waits. |
+| `crusoe_vm_nfs_mount_silly_rename_events_total` | Counter | `volume_id` | Silly renames: unlinking a file that is still open locally renames it to `.nfsXXXX` on the server, and the REMOVE is sent when the last local reference closes. |
 | `crusoe_vm_nfs_mount_short_read_events_total` | Counter | `volume_id` | Reads where the server returned fewer bytes than requested. |
 | `crusoe_vm_nfs_mount_short_write_events_total` | Counter | `volume_id` | Writes where the server committed fewer bytes than requested. |
 | `crusoe_vm_nfs_mount_delay_events_total` | Counter | `volume_id` | NFSv4 retry-after-DELAY counter (`NFS4ERR_DELAY`). **Structurally zero on NFSv3 mounts** — see caveat below. |

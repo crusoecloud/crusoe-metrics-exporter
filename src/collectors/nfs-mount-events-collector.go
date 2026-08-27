@@ -22,8 +22,10 @@ import (
 // Field layouts (Linux 5.x mountstats v1.1):
 //
 // `events: <27 numeric fields>` — see fs/nfs/iostat.h NFSIOS_* enum.
-//   We expose four counters most diagnostic for perf investigations:
+//   We expose five counters most diagnostic for perf investigations:
 //     index 19: congestion_wait  — kernel waited on RPC congestion
+//     index 22: silly_rename     - unlink of a still-open file, renamed
+//                                   to .nfsXXXX (NFSIOS_SILLYRENAME)
 //     index 23: short_read        — read returned fewer bytes than asked
 //     index 24: short_write       — write returned fewer bytes than asked
 //     index 25: delay             — kernel had to delay a client request
@@ -54,6 +56,7 @@ type NFSMountEventsCollector struct {
 
 	// events: counters
 	congestionWait *prometheus.Desc
+	sillyRename    *prometheus.Desc
 	shortRead      *prometheus.Desc
 	shortWrite     *prometheus.Desc
 	delay          *prometheus.Desc
@@ -81,6 +84,11 @@ func NewNFSMountEventsCollector(mountStatsPath string) *NFSMountEventsCollector 
 		congestionWait: prometheus.NewDesc(
 			MetricPrefix+"nfs_mount_congestion_wait_events_total",
 			"Per-mount count of times the NFS client waited on RPC congestion (events: index 19).",
+			volLabel, nil,
+		),
+		sillyRename: prometheus.NewDesc(
+			MetricPrefix+"nfs_mount_silly_rename_events_total",
+			"Per-mount count of silly renames (events: index 22, NFSIOS_SILLYRENAME): unlinking a file that is still open locally renames it to .nfsXXXX on the server, and the REMOVE is sent when the last local reference closes.",
 			volLabel, nil,
 		),
 		shortRead: prometheus.NewDesc(
@@ -153,6 +161,7 @@ func NewNFSMountEventsCollector(mountStatsPath string) *NFSMountEventsCollector 
 
 func (c *NFSMountEventsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.congestionWait
+	ch <- c.sillyRename
 	ch <- c.shortRead
 	ch <- c.shortWrite
 	ch <- c.delay
@@ -173,6 +182,7 @@ func (c *NFSMountEventsCollector) Describe(ch chan<- *prometheus.Desc) {
 // (counters only grow; age tracks the longer-lived mount).
 type mountAccum struct {
 	congestionWait   float64
+	sillyRename      float64
 	shortRead        float64
 	shortWrite       float64
 	delay            float64
@@ -195,6 +205,9 @@ type mountAccum struct {
 func (m *mountAccum) mergeMax(other *mountAccum) {
 	if other.congestionWait > m.congestionWait {
 		m.congestionWait = other.congestionWait
+	}
+	if other.sillyRename > m.sillyRename {
+		m.sillyRename = other.sillyRename
 	}
 	if other.shortRead > m.shortRead {
 		m.shortRead = other.shortRead
@@ -320,10 +333,10 @@ func (c *NFSMountEventsCollector) Collect(ch chan<- prometheus.Metric) {
 				errorCount++
 				continue
 			}
-			// Indices 19/23/24/25 (1-based after "events:" header,
-			// i.e. fields[19..25]) — congestion_wait, short_read,
-			// short_write, delay. All four are guaranteed to exist
-			// given the length gate above.
+			// Indices 19/22/23/24/25 (1-based after "events:" header,
+			// i.e. fields[19..25]): congestion_wait, silly_rename,
+			// short_read, short_write, delay. All five are guaranteed
+			// to exist given the length gate above.
 			block := &mountAccum{sawEvents: true}
 			var parseErr error
 			parseFloat := func(idx int, dst *float64) bool {
@@ -336,6 +349,7 @@ func (c *NFSMountEventsCollector) Collect(ch chan<- prometheus.Metric) {
 				return true
 			}
 			if !parseFloat(19, &block.congestionWait) ||
+				!parseFloat(22, &block.sillyRename) ||
 				!parseFloat(23, &block.shortRead) ||
 				!parseFloat(24, &block.shortWrite) ||
 				!parseFloat(25, &block.delay) {
@@ -388,6 +402,7 @@ func (c *NFSMountEventsCollector) Collect(ch chan<- prometheus.Metric) {
 	for volumeID, m := range accum {
 		if m.sawEvents {
 			ch <- prometheus.MustNewConstMetric(c.congestionWait, prometheus.CounterValue, m.congestionWait, volumeID)
+			ch <- prometheus.MustNewConstMetric(c.sillyRename, prometheus.CounterValue, m.sillyRename, volumeID)
 			ch <- prometheus.MustNewConstMetric(c.shortRead, prometheus.CounterValue, m.shortRead, volumeID)
 			ch <- prometheus.MustNewConstMetric(c.shortWrite, prometheus.CounterValue, m.shortWrite, volumeID)
 			ch <- prometheus.MustNewConstMetric(c.delay, prometheus.CounterValue, m.delay, volumeID)

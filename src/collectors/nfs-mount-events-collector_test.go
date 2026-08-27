@@ -17,8 +17,8 @@ func TestNFSMountEventsCollectorDescribe(t *testing.T) {
 	for range ch {
 		got++
 	}
-	// 4 events counters + 8 bytes counters + 1 age gauge + 1 collection_errors = 14
-	want := 14
+	// 5 events counters + 8 bytes counters + 1 age gauge + 1 collection_errors = 15
+	want := 15
 	if got != want {
 		t.Errorf("Describe emitted %d descriptors, want %d", got, want)
 	}
@@ -29,14 +29,15 @@ func TestNFSMountEventsCollector_AllLines(t *testing.T) {
 	// Values chosen to be distinct so a field-index error in parsing
 	// surfaces as a wrong value rather than coincidental zeros.
 	//
-	// events: indices we consume: 19 (congestion_wait), 23 (short_read),
-	// 24 (short_write), 25 (delay). Pad the line with 27 fields total.
+	// events: indices we consume: 19 (congestion_wait), 22 (silly_rename),
+	// 23 (short_read), 24 (short_write), 25 (delay). Pad the line with 27
+	// fields total.
 	fixture := "" +
 		"device nfs.example.com:/volumes/aaaaaaaa-1111-2222-3333-444444444444 mounted on /mnt/sharedfs with fstype nfs statvers=1.1\n" +
 		"\tage:\t12345\n" +
-		// 27 event counters; positions 19/23/24/25 set to 191/231/241/251.
-		// (1-indexed after "events:" header.)
-		"\tevents:\t1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 191 20 21 22 231 241 251 26 27\n" +
+		// 27 event counters; positions 19/22/23/24/25 set to
+		// 191/221/231/241/251. (1-indexed after "events:" header.)
+		"\tevents:\t1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 191 20 21 221 231 241 251 26 27\n" +
 		// 8 byte counters with distinct values.
 		"\tbytes:\t100 200 300 400 500 600 700 800\n" +
 		"\tper-op statistics\n"
@@ -58,6 +59,7 @@ func TestNFSMountEventsCollector_AllLines(t *testing.T) {
 	}{
 		{"crusoe_vm_nfs_mount_age_seconds", 12345},
 		{"crusoe_vm_nfs_mount_congestion_wait_events_total", 191},
+		{"crusoe_vm_nfs_mount_silly_rename_events_total", 221},
 		{"crusoe_vm_nfs_mount_short_read_events_total", 231},
 		{"crusoe_vm_nfs_mount_short_write_events_total", 241},
 		{"crusoe_vm_nfs_mount_delay_events_total", 251},
@@ -94,7 +96,7 @@ func TestNFSMountEventsCollector_MultiBlockMaxAggregation(t *testing.T) {
 		"\tper-op statistics\n" +
 		"device nfs.example.com:/volumes/cccccccc-1111-2222-3333-444444444444 mounted on /mnt/b with fstype nfs statvers=1.1\n" +
 		"\tage:\t250\n" +
-		"\tevents:\t1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 70 20 21 22 90 100 200 26 27\n" +
+		"\tevents:\t1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 70 20 21 44 90 100 200 26 27\n" +
 		"\tbytes:\t2000 4000 6000 8000 10000 12000 14000 16000\n" +
 		"\tper-op statistics\n"
 
@@ -125,6 +127,9 @@ func TestNFSMountEventsCollector_MultiBlockMaxAggregation(t *testing.T) {
 	}
 	if got := values["crusoe_vm_nfs_mount_delay_events_total"]; got != 200 {
 		t.Errorf("delay = %v, want 200 (max across blocks)", got)
+	}
+	if got := values["crusoe_vm_nfs_mount_silly_rename_events_total"]; got != 44 {
+		t.Errorf("silly_rename = %v, want 44 (max across blocks)", got)
 	}
 	if got := values["crusoe_vm_nfs_mount_direct_read_bytes_total"]; got != 6000 {
 		t.Errorf("direct_read_bytes = %v, want 6000 (max across blocks)", got)
@@ -234,6 +239,7 @@ func TestNFSMountEventsCollector_GoldenFixture_NconnectMount(t *testing.T) {
 	//   age: 245
 	//   events: 35 209 0 0 33 23 271 397086 0 0 0 47 0 1 49 0 0 29 0 0 397086 0 0 0 0 0 0
 	//     → index 19 (congestion_wait) = 0
+	//     → index 22 (silly_rename)    = 0
 	//     → index 23 (short_read)      = 0
 	//     → index 24 (short_write)     = 0
 	//     → index 25 (delay)           = 0
@@ -266,6 +272,7 @@ func TestNFSMountEventsCollector_GoldenFixture_NconnectMount(t *testing.T) {
 		// at 0 and rate() will hit zero rather than no-data).
 		{"crusoe_vm_nfs_mount_delay_events_total", 0},
 		{"crusoe_vm_nfs_mount_congestion_wait_events_total", 0},
+		{"crusoe_vm_nfs_mount_silly_rename_events_total", 0},
 	}
 	for _, tc := range cases {
 		got, ok := values[tc.name]

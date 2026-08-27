@@ -27,11 +27,13 @@ import (
 //	fields[10] = req_u           (cumulative request-slot utilization)
 //	fields[11] = bklog_u         ← counter (backlog utilization, cumulative)
 //	fields[12] = max_slots       ← gauge (high-water mark of slot table size)
-//	fields[13] = sending_u       (cumulative sending utilization)
-//	fields[14] = pending_u       (cumulative pending utilization)
+//	fields[13] = sending_u       ← counter (cumulative sending-queue utilization)
+//	fields[14] = pending_u       ← counter (cumulative pending-queue utilization)
 //
-// Minimum length for a usable line is 13 (so we can reach max_slots at
-// index 12). Shorter lines are treated as malformed.
+// Minimum length for a usable line is 15: the kernel emits all 13
+// numeric fields in a single seq_printf (net/sunrpc/xprtsock.c,
+// xs_tcp_print_stats), so a shorter line is truncation, treated as
+// malformed.
 
 func writeMountstats(t *testing.T, content string) string {
 	t.Helper()
@@ -102,10 +104,11 @@ func TestNFSXprtCollectorDescribe(t *testing.T) {
 	for range ch {
 		got++
 	}
-	// 7 per-xprt metrics: sends, recvs, connect_count, bad_xids,
-	// max_slots, idle_seconds, backlog_utilization.
-	// + 1 collection_errors metric. Total 8.
-	want := 8
+	// 9 per-xprt metrics: sends, recvs, connect_count, bad_xids,
+	// max_slots, idle_seconds, backlog_utilization,
+	// sending_utilization, pending_utilization.
+	// + 1 collection_errors metric. Total 10.
+	want := 10
 	if got != want {
 		t.Errorf("Describe emitted %d descriptors, want %d", got, want)
 	}
@@ -127,9 +130,9 @@ func TestNFSXprtCollector_SingleXprt(t *testing.T) {
 
 	metrics := collectMetrics(t, c)
 
-	// Expected: 7 per-xprt + 1 collection_errors = 8.
-	if len(metrics) != 8 {
-		t.Fatalf("got %d metrics, want 8", len(metrics))
+	// Expected: 9 per-xprt + 1 collection_errors = 10.
+	if len(metrics) != 10 {
+		t.Fatalf("got %d metrics, want 10", len(metrics))
 	}
 
 	type key struct{ name, vol, idx string }
@@ -153,6 +156,8 @@ func TestNFSXprtCollector_SingleXprt(t *testing.T) {
 		{"crusoe_vm_nfs_xprt_bad_xids_total", 5},
 		{"crusoe_vm_nfs_xprt_backlog_utilization", 3},
 		{"crusoe_vm_nfs_xprt_max_slots", 128},
+		{"crusoe_vm_nfs_xprt_sending_utilization", 64},
+		{"crusoe_vm_nfs_xprt_pending_utilization", 27},
 	}
 	for _, tc := range cases {
 		got, ok := values[key{name: tc.name, vol: vol, idx: "0"}]
@@ -413,4 +418,30 @@ func TestNFSXprtCollector_GoldenFixture_NconnectMount(t *testing.T) {
 		}
 	}
 	t.Errorf("never found xprt_idx=0 series in golden fixture output")
+}
+
+// TestNFSXprtCollector_GoldenFixture_SendingPending pins the trailing
+// sending_u/pending_u fields (indices 13/14) against the real capture.
+// sending_u accumulates send-queue occupancy and pending_u accumulates the
+// occupancy of RPCs waiting for a reply. The first xprt in the captured
+// file has sending_u=72 and pending_u=27606.
+func TestNFSXprtCollector_GoldenFixture_SendingPending(t *testing.T) {
+	metrics := collectMetrics(t, NewNFSXprtCollector("testdata/mountstats_real_nconnect16.txt"))
+
+	vol := "00000000-0000-0000-0000-000000000001"
+	got := map[string]float64{}
+	for _, m := range metrics {
+		l := metricLabels(m)
+		if l["volume_id"] != vol || l["xprt_idx"] != "0" {
+			continue
+		}
+		got[fqName(m)] = metricValue(m)
+	}
+
+	if v, ok := got["crusoe_vm_nfs_xprt_sending_utilization"]; !ok || v != 72 {
+		t.Errorf("sending_utilization{xprt_idx=0} = %v (present=%v), want 72 (from captured data)", v, ok)
+	}
+	if v, ok := got["crusoe_vm_nfs_xprt_pending_utilization"]; !ok || v != 27606 {
+		t.Errorf("pending_utilization{xprt_idx=0} = %v (present=%v), want 27606 (from captured data)", v, ok)
+	}
 }

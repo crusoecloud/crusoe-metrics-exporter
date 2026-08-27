@@ -16,9 +16,9 @@ func TestNFSStatsCollectorDescribe(t *testing.T) {
 	for range ch {
 		got++
 	}
-	// rpcCount, rpcTimeouts, rpcRttMs, rpcExeMs, rpcQueueMs, bytesSent,
-	// bytesRecv, backlog, collectionErrors = 9
-	want := 9
+	// rpcCount, rpcTimeouts, rpcRetrans, rpcErrors, rpcRttMs, rpcExeMs,
+	// rpcQueueMs, bytesSent, bytesRecv, backlog, collectionErrors = 11
+	want := 11
 	if got != want {
 		t.Errorf("Describe emitted %d descriptors, want %d", got, want)
 	}
@@ -44,6 +44,10 @@ func TestNFSStatsCollector_AllTrackedOps(t *testing.T) {
 		"\t     COMMIT: 109 109 9 119 129 139 149 159 9\n" +
 		"\t    READDIR: 110 110 10 120 130 140 150 160 10\n" +
 		"\tREADDIRPLUS: 111 111 11 121 131 141 151 161 11\n" +
+		"\t       NULL: 112 112 12 122 132 142 152 162 12\n" +
+		"\t     FSSTAT: 113 113 13 123 133 143 153 163 13\n" +
+		"\t     FSINFO: 114 114 14 124 134 144 154 164 14\n" +
+		"\t   PATHCONF: 115 115 15 125 135 145 155 165 15\n" +
 		"\t    SETATTR: 999 999 99 999 999 999 999 999 99\n"
 
 	path := writeMountstats(t, fixture)
@@ -64,6 +68,7 @@ func TestNFSStatsCollector_AllTrackedOps(t *testing.T) {
 		"read": 101, "write": 102, "getattr": 103, "lookup": 104,
 		"access": 105, "create": 106, "remove": 107, "rename": 108,
 		"commit": 109, "readdir": 110, "readdirplus": 111,
+		"null": 112, "fsstat": 113, "fsinfo": 114, "pathconf": 115,
 	}
 	for op, want := range wantOps {
 		if got, ok := gotOps[op]; !ok || got != want {
@@ -236,6 +241,8 @@ func TestNFSStatsCollector_GoldenFixture_NconnectMount(t *testing.T) {
 	wantPresent := map[string]float64{
 		"read": 637414, "write": 1410, "getattr": 35, "lookup": 21,
 		"access": 11, "create": 12,
+		// Mount-time RPCs: the ops a mount() issues before any I/O.
+		"null": 16, "fsstat": 3, "fsinfo": 2, "pathconf": 1,
 	}
 	for op, want := range wantPresent {
 		if got, ok := gotOps[op]; !ok || got != want {
@@ -326,5 +333,55 @@ func TestNFSStatsCollector_GoldenFixture_SharedVolumeManyMounts(t *testing.T) {
 	// setattr has nonzero ops in this fixture too but remains untracked.
 	if _, ok := gotOps["setattr"]; ok {
 		t.Errorf("untracked op %q must not appear in output even with nonzero ops across many blocks", "setattr")
+	}
+}
+
+// TestNFSStatsCollector_RetransAndErrors pins the trans (field 2) and errors
+// (field 9) per-op fields. trans counts transmissions where ops counts
+// operations, so trans - ops is the retransmit count; errors counts ops whose
+// RPC completed with an error status from the server. Values are distinct
+// from every other field on the line so a field shift causes a test failure.
+func TestNFSStatsCollector_RetransAndErrors(t *testing.T) {
+	// Per-op line format: OP: ops trans maj_to bytes_sent bytes_recv queue rtt exe errors
+	// WRITE: ops=10, trans=25 → retransmits=15; errors=4.
+	// GETATTR: ops==trans → retransmits=0; errors=0.
+	fixture := "" +
+		"device nfs.example.com:/volumes/eeeeeeee-5555-6666-7777-888888888888 mounted on /mnt/r with fstype nfs statvers=1.1\n" +
+		"\tper-op statistics\n" +
+		"\t  WRITE: 10 25 3 1000 2000 600 70 800 4\n" +
+		"\tGETATTR: 7 7 0 100 100 0 5 5 0\n"
+
+	path := writeMountstats(t, fixture)
+	metrics := collectMetrics(t, NewNFSStatsCollector(path))
+
+	type key struct{ name, op string }
+	got := map[key]float64{}
+	for _, m := range metrics {
+		l := metricLabels(m)
+		if l["volume_id"] != "eeeeeeee-5555-6666-7777-888888888888" {
+			continue
+		}
+		got[key{fqName(m), l["nfs_operation"]}] = metricValue(m)
+	}
+
+	cases := []struct {
+		name, op string
+		want     float64
+	}{
+		{"crusoe_vm_nfs_rpc_retransmits_total", "write", 15},
+		{"crusoe_vm_nfs_rpc_errors_total", "write", 4},
+		{"crusoe_vm_nfs_rpc_timeouts_total", "write", 3},
+		{"crusoe_vm_nfs_rpc_retransmits_total", "getattr", 0},
+		{"crusoe_vm_nfs_rpc_errors_total", "getattr", 0},
+	}
+	for _, tc := range cases {
+		v, ok := got[key{tc.name, tc.op}]
+		if !ok {
+			t.Errorf("%s{nfs_operation=%q} not emitted", tc.name, tc.op)
+			continue
+		}
+		if v != tc.want {
+			t.Errorf("%s{nfs_operation=%q} = %v, want %v", tc.name, tc.op, v, tc.want)
+		}
 	}
 }

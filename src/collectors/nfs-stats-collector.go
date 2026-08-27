@@ -12,8 +12,12 @@ import (
 
 // trackedOps are the per-op mountstats lines we export RTT/exe/count/bytes
 // for. Kept deliberately narrower than the full NFSv3/v4 op set to avoid
-// exporting ops that are near-always-zero after mount (FSSTAT, FSINFO,
-// PATHCONF, NULL, READLINK, SYMLINK, MKNOD, RMDIR, LINK, SETATTR).
+// exporting ops that are near-always-zero after mount (READLINK, SYMLINK,
+// MKNOD, RMDIR, LINK, SETATTR).
+//
+// NULL, FSSTAT, FSINFO and PATHCONF are also near-always-zero after
+// mount, but they are the RPCs that mount() itself issues, so they are
+// tracked to give visibility into mount-time RPC behavior.
 var trackedOps = map[string]bool{
 	"READ:":        true,
 	"WRITE:":       true,
@@ -26,12 +30,18 @@ var trackedOps = map[string]bool{
 	"COMMIT:":      true,
 	"READDIR:":     true,
 	"READDIRPLUS:": true,
+	"NULL:":        true,
+	"FSSTAT:":      true,
+	"FSINFO:":      true,
+	"PATHCONF:":    true,
 }
 
 type NFSStatsCollector struct {
 	mountStatsPath   string
 	rpcCount         *prometheus.Desc
 	rpcTimeouts      *prometheus.Desc
+	rpcRetrans       *prometheus.Desc
+	rpcErrors        *prometheus.Desc
 	rpcRttMs         *prometheus.Desc
 	rpcExeMs         *prometheus.Desc
 	rpcQueueMs       *prometheus.Desc
@@ -59,6 +69,18 @@ func NewNFSStatsCollector(mountStatsPath string) *NFSStatsCollector {
 		rpcTimeouts: prometheus.NewDesc(
 			MetricPrefix+"nfs_rpc_timeouts_total",
 			"Total number of NFS RPC timeouts",
+			[]string{"volume_id", "nfs_operation"},
+			nil,
+		),
+		rpcRetrans: prometheus.NewDesc(
+			MetricPrefix+"nfs_rpc_retransmits_total",
+			"Total NFS RPC retransmissions (mountstats per-op trans minus ops). Increments when a request is sent again because no reply arrived.",
+			[]string{"volume_id", "nfs_operation"},
+			nil,
+		),
+		rpcErrors: prometheus.NewDesc(
+			MetricPrefix+"nfs_rpc_errors_total",
+			"Total NFS RPCs that completed with an error status (mountstats per-op field 9).",
 			[]string{"volume_id", "nfs_operation"},
 			nil,
 		),
@@ -103,6 +125,8 @@ func NewNFSStatsCollector(mountStatsPath string) *NFSStatsCollector {
 func (c *NFSStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.rpcCount
 	ch <- c.rpcTimeouts
+	ch <- c.rpcRetrans
+	ch <- c.rpcErrors
 	ch <- c.rpcRttMs
 	ch <- c.rpcExeMs
 	ch <- c.rpcQueueMs
@@ -138,6 +162,8 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 	type rpcStats struct {
 		ops       float64
 		timeouts  float64
+		retrans   float64
+		errors    float64
 		rtt       float64
 		exe       float64
 		queue     float64
@@ -239,6 +265,33 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 				bytesRecv, _ = strconv.ParseFloat(fields[5], 64)
 			}
 
+			// trans (field 2) counts transmissions where ops counts
+			// operations, and the kernel guarantees trans >= ops
+			// (net/sunrpc/stats.c: "om_ops must never become larger
+			// than om_ntrans"), so trans - ops is a monotonic
+			// retransmit counter. Clamp anyway so a kernel that
+			// breaks the invariant can't produce a negative counter.
+			trans, err := strconv.ParseFloat(fields[2], 64)
+			if err != nil {
+				log.Warnf("Error parsing trans count: %v", err)
+				errorCount++
+				continue
+			}
+			retrans := trans - opsCount
+			if retrans < 0 {
+				retrans = 0
+			}
+
+			// errors (field 9): ops that completed with an error
+			// status. The len(fields) < 10 guard above means the
+			// field is always present here.
+			rpcErrors, err := strconv.ParseFloat(fields[9], 64)
+			if err != nil {
+				log.Warnf("Error parsing errors count: %v", err)
+				errorCount++
+				continue
+			}
+
 			key := rpcKey{volumeID: currentVolumeID, operation: opType}
 			if existing, ok := rpcAccum[key]; ok {
 				// Same volume+op seen again; keep the max values
@@ -247,6 +300,12 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 				if timeouts > existing.timeouts {
 					existing.timeouts = timeouts
+				}
+				if retrans > existing.retrans {
+					existing.retrans = retrans
+				}
+				if rpcErrors > existing.errors {
+					existing.errors = rpcErrors
 				}
 				if rttTime > existing.rtt {
 					existing.rtt = rttTime
@@ -264,7 +323,7 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 					existing.bytesRecv = bytesRecv
 				}
 			} else {
-				rpcAccum[key] = &rpcStats{ops: opsCount, timeouts: timeouts, rtt: rttTime, exe: exeTime, queue: queueTime, bytesSent: bytesSent, bytesRecv: bytesRecv}
+				rpcAccum[key] = &rpcStats{ops: opsCount, timeouts: timeouts, retrans: retrans, errors: rpcErrors, rtt: rttTime, exe: exeTime, queue: queueTime, bytesSent: bytesSent, bytesRecv: bytesRecv}
 			}
 		}
 	}
@@ -278,6 +337,8 @@ func (c *NFSStatsCollector) Collect(ch chan<- prometheus.Metric) {
 	for key, stats := range rpcAccum {
 		ch <- prometheus.MustNewConstMetric(c.rpcCount, prometheus.CounterValue, stats.ops, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.rpcTimeouts, prometheus.CounterValue, stats.timeouts, key.volumeID, key.operation)
+		ch <- prometheus.MustNewConstMetric(c.rpcRetrans, prometheus.CounterValue, stats.retrans, key.volumeID, key.operation)
+		ch <- prometheus.MustNewConstMetric(c.rpcErrors, prometheus.CounterValue, stats.errors, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.rpcRttMs, prometheus.CounterValue, stats.rtt, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.rpcExeMs, prometheus.CounterValue, stats.exe, key.volumeID, key.operation)
 		ch <- prometheus.MustNewConstMetric(c.rpcQueueMs, prometheus.CounterValue, stats.queue, key.volumeID, key.operation)
