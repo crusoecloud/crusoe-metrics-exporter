@@ -55,13 +55,13 @@ import (
 //	fields[10] = req_u          (cumulative request-slot utilization)
 //	fields[11] = bklog_u        (cumulative backlog utilization)
 //	fields[12] = max_slots      (high-water mark of slot table size)
-//	fields[13] = sending_u      (cumulative sending utilization)
-//	fields[14] = pending_u      (cumulative pending utilization)
+//	fields[13] = sending_u      (cumulative sending-queue utilization)
+//	fields[14] = pending_u      (cumulative pending-queue utilization)
 //
-// We require len(fields) >= 13 — enough to reach max_slots at index 12.
-// Trailing utilization counters are accepted-but-ignored; missing ones
-// surface as a parse failure incremented onto the collection-errors
-// counter rather than a panic.
+// We require len(fields) >= 15: the kernel emits all 13 numeric fields in
+// a single seq_printf (net/sunrpc/xprtsock.c, xs_tcp_print_stats), so a
+// shorter line is truncation. It surfaces as a parse failure incremented
+// onto the collection-errors counter rather than a panic.
 type NFSXprtCollector struct {
 	mountStatsPath string
 
@@ -72,6 +72,8 @@ type NFSXprtCollector struct {
 	maxSlots         *prometheus.Desc
 	idleSeconds      *prometheus.Desc
 	backlogU         *prometheus.Desc
+	sendingU         *prometheus.Desc
+	pendingU         *prometheus.Desc
 	collectionErrors *prometheus.Desc
 }
 
@@ -114,6 +116,16 @@ func NewNFSXprtCollector(mountStatsPath string) *NFSXprtCollector {
 			"Cumulative per-xprt backlog utilization. Differentiates lanes — useful when the volume-aggregate backlog metric is climbing and you want to localize which lane is queueing.",
 			labels, nil,
 		),
+		sendingU: prometheus.NewDesc(
+			MetricPrefix+"nfs_xprt_sending_utilization",
+			"Cumulative sending-queue utilization for this xprt (sending_u): RPCs that hold a slot and are being transmitted. Compare with backlog_utilization (waiting for a slot) and pending_utilization (sent, waiting for a reply).",
+			labels, nil,
+		),
+		pendingU: prometheus.NewDesc(
+			MetricPrefix+"nfs_xprt_pending_utilization",
+			"Cumulative pending-queue utilization for this xprt (pending_u): RPCs sent and waiting for the server's reply.",
+			labels, nil,
+		),
 		collectionErrors: prometheus.NewDesc(
 			MetricPrefix+"nfs_xprt_stats_collection_errors_total",
 			"Total number of errors encountered while parsing xprt lines from mountstats.",
@@ -130,6 +142,8 @@ func (c *NFSXprtCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.maxSlots
 	ch <- c.idleSeconds
 	ch <- c.backlogU
+	ch <- c.sendingU
+	ch <- c.pendingU
 	ch <- c.collectionErrors
 }
 
@@ -148,6 +162,8 @@ type xprtStats struct {
 	maxSlots     float64
 	idleSeconds  float64
 	backlogU     float64
+	sendingU     float64
+	pendingU     float64
 }
 
 // maxMerge updates `dst` to the max of the existing values and the new
@@ -174,6 +190,12 @@ func (s *xprtStats) maxMerge(other xprtStats) {
 	}
 	if other.backlogU > s.backlogU {
 		s.backlogU = other.backlogU
+	}
+	if other.sendingU > s.sendingU {
+		s.sendingU = other.sendingU
+	}
+	if other.pendingU > s.pendingU {
+		s.pendingU = other.pendingU
 	}
 }
 
@@ -252,12 +274,12 @@ func (c *NFSXprtCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		// Malformed TCP xprt line: claims tcp but doesn't carry
-		// enough fields to reach max_slots (idx 12). Surface as a
+		// enough fields to reach pending_u (idx 14). Surface as a
 		// collection error rather than silently skipping — silent
 		// skip of malformed input is the failure mode that hid
 		// kernel-format mismatches across the existing 30-VM error
 		// cohort.
-		if len(fields) < 13 {
+		if len(fields) < 15 {
 			log.Warnf("malformed xprt: tcp line (too few fields, %d): %q", len(fields), line)
 			errorCount++
 			continue
@@ -292,13 +314,15 @@ func (c *NFSXprtCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.maxSlots, prometheus.GaugeValue, s.maxSlots, key.volumeID, idxStr)
 		ch <- prometheus.MustNewConstMetric(c.idleSeconds, prometheus.GaugeValue, s.idleSeconds, key.volumeID, idxStr)
 		ch <- prometheus.MustNewConstMetric(c.backlogU, prometheus.CounterValue, s.backlogU, key.volumeID, idxStr)
+		ch <- prometheus.MustNewConstMetric(c.sendingU, prometheus.CounterValue, s.sendingU, key.volumeID, idxStr)
+		ch <- prometheus.MustNewConstMetric(c.pendingU, prometheus.CounterValue, s.pendingU, key.volumeID, idxStr)
 	}
 
 	ch <- prometheus.MustNewConstMetric(c.collectionErrors, prometheus.CounterValue, errorCount)
 }
 
-// parseXprtFields converts the 13+ numeric fields of an xprt: tcp line
-// into the seven values we expose as metrics. Returns a wrapped error
+// parseXprtFields converts the 13 numeric fields of an xprt: tcp line
+// into the nine values we expose as metrics. Returns a wrapped error
 // identifying which field index failed so debugging a kernel-format drift
 // doesn't require diffing the line against the expected layout.
 func parseXprtFields(fields []string) (xprtStats, error) {
@@ -337,6 +361,14 @@ func parseXprtFields(fields []string) (xprtStats, error) {
 	if err != nil {
 		return xprtStats{}, err
 	}
+	sendingU, err := parseAt(13)
+	if err != nil {
+		return xprtStats{}, err
+	}
+	pendingU, err := parseAt(14)
+	if err != nil {
+		return xprtStats{}, err
+	}
 	return xprtStats{
 		sends:        sends,
 		recvs:        recvs,
@@ -345,5 +377,7 @@ func parseXprtFields(fields []string) (xprtStats, error) {
 		maxSlots:     maxSlots,
 		idleSeconds:  idleSeconds,
 		backlogU:     backlogU,
+		sendingU:     sendingU,
+		pendingU:     pendingU,
 	}, nil
 }
