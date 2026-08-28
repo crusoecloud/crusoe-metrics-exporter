@@ -294,12 +294,14 @@ func (c *NFSLatencyCollector) resolveDomainName(domainName string) []string {
 	return ips
 }
 
-// extractIPsFromMountOptions extracts all IPs from mount options
+// extractIPsFromMountOptions extracts all IPs from mount options. fields is
+// a whitespace split of one /proc/mounts line: `device mountpoint fstype
+// options dump pass` -- the options are always exactly fields[3], a single
+// comma-separated token with no internal spaces.
 func (c *NFSLatencyCollector) extractIPsFromMountOptions(fields []string) []string {
 	var ips []string
 
-	// Join all fields from index 5 onwards (options)
-	optionsString := strings.Join(fields[5:], " ")
+	optionsString := fields[3]
 
 	// Find all addr= occurrences (not mountaddr=)
 	searchStart := 0
@@ -433,6 +435,11 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 
 	// mapping: IP → volume ID (only for mounts with :/volumes/ path)
 	mapping := make(map[string]string)
+	// ambiguousIPs: IPs seen with more than one distinct volume ID this
+	// scan (a single server IP hosting multiple exports). The eBPF probe
+	// only ever observes dst_ip, never which export a packet belongs to,
+	// so there is no way to attribute traffic on these IPs to one volume.
+	ambiguousIPs := make(map[string]bool)
 	// allNFSIPs: every NFS server IP discovered, regardless of volume mapping
 	allNFSIPs := make(map[string]bool)
 
@@ -486,6 +493,9 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 			if len(parts) == 2 {
 				volumeID := parts[1]
 				for _, ip := range mountIPs {
+					if existing, ok := mapping[ip]; ok && existing != volumeID {
+						ambiguousIPs[ip] = true
+					}
 					mapping[ip] = volumeID
 				}
 			}
@@ -511,9 +521,20 @@ func (c *NFSLatencyCollector) updateVolumeMapping() error {
 		}
 	}
 
+	// Drop ambiguous IPs rather than silently keeping whichever volume
+	// happened to be scanned last -- that choice depends on /proc/mounts
+	// line order and can flip on any refresh, which would misattribute
+	// one volume's traffic to another between scrapes. getVolumeID() will
+	// label these as unknown-<ip> instead once removed from the mapping.
+	for ip := range ambiguousIPs {
+		log.Warnf("NFS volume mapping: IP %s serves multiple exports (last seen: %s); "+
+			"latency/request metrics for this IP cannot be attributed to a single volume_id and will be labeled unknown-%s", ip, mapping[ip], ip)
+		delete(mapping, ip)
+	}
+
 	c.volumeMapping.UpdateMapping(mapping)
 	c.lastMappingUpdate = time.Now()
-	log.Infof("Updated NFS volume mapping: %d volume entries, %d total server IPs", len(mapping), len(allNFSIPs))
+	log.Infof("Updated NFS volume mapping: %d volume entries, %d total server IPs, %d ambiguous IPs dropped", len(mapping), len(allNFSIPs), len(ambiguousIPs))
 
 	// Update eBPF map with ALL NFS server IPs (not just volume-mapped ones)
 	allIPMapping := make(map[string]string)
@@ -768,7 +789,14 @@ func (c *NFSLatencyCollector) refreshMountsIfNeeded() {
 	}
 }
 
-// getVolumeID returns the volume ID for a given IP and export path hash
+// getVolumeID returns the volume ID for a given IP and export path hash.
+//
+// exportPathHash is always 0 at the only call site (Collect()): the eBPF
+// probe observes dst_ip only and has no way to learn which export/file a
+// given packet belongs to, so GetVolumeIDByHash can never match a real
+// entry and this always falls through to the plain IP-based lookup. The
+// parameter is kept for if/when the probe is extended to capture a real
+// per-request export signal.
 func (c *NFSLatencyCollector) getVolumeID(ip string, exportPathHash uint64) string {
 	if !c.config.EnableVolumeID {
 		return ""
@@ -782,8 +810,12 @@ func (c *NFSLatencyCollector) getVolumeID(ip string, exportPathHash uint64) stri
 	}
 
 	if volumeID == "" {
-		// If no mapping found, use hash-based identifier
-		volumeID = fmt.Sprintf("unknown-%x", exportPathHash)
+		// No single volume resolved for this IP: either it's genuinely
+		// unmapped, or updateVolumeMapping() dropped it for serving
+		// multiple exports (see ambiguousIPs). Label by IP rather than by
+		// the (always-zero) hash so distinct IPs stay distinguishable
+		// instead of every case collapsing into "unknown-0".
+		volumeID = fmt.Sprintf("unknown-%s", ip)
 	}
 
 	return volumeID
