@@ -3,6 +3,8 @@ package collectors
 import (
 	"encoding/binary"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +63,107 @@ func TestNFSVolumeMapping(t *testing.T) {
 	unknownVolumeID := vm.GetVolumeID("10.0.0.99")
 	if unknownVolumeID != "" {
 		t.Errorf("Expected empty string for unknown IP, got %s", unknownVolumeID)
+	}
+}
+
+// TestNFSVolumeMapping_AmbiguousIPNotMisattributed verifies that when a
+// single server IP hosts more than one export (e.g. a shared filer with
+// several /volumes/<uuid> exports behind one address), updateVolumeMapping
+// does not silently pick one volume as the winner for that IP. Traffic to
+// an ambiguous IP must resolve to a stable unknown-<ip> label instead of
+// being attributed to an unrelated real volume, and that label must not
+// change across repeated refreshes of the same mounts data.
+//
+// Mount server addresses in /proc/mounts can legitimately be either a
+// hostname (IP discovered via the addr= mount option, or DNS as a last
+// resort) or a literal IP (used directly, no option parsing needed). Both
+// forms are exercised here as non-ambiguous controls alongside the
+// ambiguous case: without them, a totally broken discovery/mapping
+// mechanism would also produce an unresolved "unknown-<ip>" label for the
+// ambiguous IP, and the core assertions below would pass for the wrong
+// reason.
+func TestNFSVolumeMapping_AmbiguousIPNotMisattributed(t *testing.T) {
+	config := NFSConfig{
+		EnableVolumeID:       true,
+		MountRefreshInterval: 30 * time.Second,
+	}
+
+	collector, err := NewNFSLatencyCollector(config)
+	if err != nil {
+		t.Skip("Skipping test - collector creation failed (expected in test environment)")
+		return
+	}
+	defer collector.Close()
+
+	mountsFile := filepath.Join(t.TempDir(), "mounts")
+	contents := "" +
+		// Control 1: hostname server, IP discovered via addr= (not DNS --
+		// nfs-host-control.invalid is not expected to resolve).
+		"nfs-host-control.invalid:/volumes/vol-CONTROL-HOST /mnt/ch nfs rw,addr=10.0.0.9 0 0\n" +
+		// Control 2: literal-IP server, no addr= option needed.
+		"10.0.0.10:/volumes/vol-CONTROL-IP /mnt/ci nfs rw 0 0\n" +
+		// Ambiguous: two distinct exports sharing one server IP via addr=.
+		"nfs-host-shared.invalid:/volumes/vol-AAAA /mnt/a nfs rw,addr=10.0.0.5 0 0\n" +
+		"nfs-host-shared.invalid:/volumes/vol-BBBB /mnt/b nfs rw,addr=10.0.0.5 0 0\n"
+	if err := os.WriteFile(mountsFile, []byte(contents), 0o644); err != nil {
+		t.Fatalf("failed to write test mounts file: %v", err)
+	}
+	collector.config.HostMountsPath = mountsFile
+
+	if err := collector.updateVolumeMapping(); err != nil {
+		t.Fatalf("updateVolumeMapping failed: %v", err)
+	}
+
+	if got := collector.getVolumeID("10.0.0.9", 0); got != "vol-CONTROL-HOST" {
+		t.Fatalf("hostname+addr= mount did not resolve to its real volume (got %q) -- "+
+			"IP discovery from mount options is broken, so the ambiguous-IP "+
+			"assertions below would be meaningless", got)
+	}
+	if got := collector.getVolumeID("10.0.0.10", 0); got != "vol-CONTROL-IP" {
+		t.Fatalf("literal-IP mount did not resolve to its real volume (got %q) -- "+
+			"IP discovery from a bare IP server is broken, so the ambiguous-IP "+
+			"assertions below would be meaningless", got)
+	}
+
+	got := collector.getVolumeID("10.0.0.5", 0)
+	if got == "vol-AAAA" || got == "vol-BBBB" {
+		t.Errorf("ambiguous IP was attributed to a single real volume (%s); "+
+			"traffic on a shared IP must not be silently mislabeled", got)
+	}
+	want := "unknown-10.0.0.5"
+	if got != want {
+		t.Errorf("expected stable ambiguous-IP label %q, got %q", want, got)
+	}
+
+	// Re-running against identical input must yield the same label -- this
+	// is the flapping scenario: the same ambiguous IP must resolve
+	// identically on every refresh, not flip between vol-AAAA/vol-BBBB.
+	if err := collector.updateVolumeMapping(); err != nil {
+		t.Fatalf("second updateVolumeMapping failed: %v", err)
+	}
+	if again := collector.getVolumeID("10.0.0.5", 0); again != want {
+		t.Errorf("label changed across refreshes: got %q, then %q", got, again)
+	}
+	if again := collector.getVolumeID("10.0.0.9", 0); again != "vol-CONTROL-HOST" {
+		t.Errorf("hostname control label changed across refreshes: got %q", again)
+	}
+	if again := collector.getVolumeID("10.0.0.10", 0); again != "vol-CONTROL-IP" {
+		t.Errorf("literal-IP control label changed across refreshes: got %q", again)
+	}
+}
+
+// TestExtractIPsFromMountOptions_AddrField verifies IP extraction reads the
+// mount options from the correct /proc/mounts field. A line has exactly six
+// whitespace-separated fields (device mountpoint fstype options dump pass);
+// options is fields[3]. This pins that index directly so a regression here
+// fails loudly instead of silently falling through to the DNS/literal-IP
+// fallback paths in updateVolumeMapping, which can mask it.
+func TestExtractIPsFromMountOptions_AddrField(t *testing.T) {
+	c := &NFSLatencyCollector{}
+	fields := strings.Fields("myserver:/volumes/vol-1 /mnt/a nfs rw,addr=10.1.2.3,vers=3 0 0")
+	ips := c.extractIPsFromMountOptions(fields)
+	if len(ips) != 1 || ips[0] != "10.1.2.3" {
+		t.Fatalf("expected [10.1.2.3], got %v", ips)
 	}
 }
 
