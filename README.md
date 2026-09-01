@@ -168,6 +168,22 @@ Parses the per-`xprt:` lines from `/proc/1/mountstats` and emits one series per 
 | `crusoe_vm_nfs_xprt_pending_utilization` | Counter | `volume_id`, `xprt_idx` | Cumulative pending-queue occupancy (`pending_u`): RPCs sent and waiting for the server's reply. |
 | `crusoe_vm_nfs_xprt_stats_collection_errors_total` | Counter | - | Collection errors. |
 
+### NFS Socket-State Collector (`/proc/net/tcp`)
+
+**Source:** `src/collectors/nfs-sock-state-collector.go`
+
+Reports the live TCP state of each `nconnect` lane, joined to the NFS transport by source port. mountstats gives per-lane activity counters but never the transport's current TCP state or how much data is stuck in the socket buffers, so a stall driven by a wedged or reset connection is invisible in the metrics above. This collector closes that at the TCP layer, reading `/proc/1/net/tcp` and `/proc/1/net/tcp6` (the same host-proc mount as mountstats, no extra privilege).
+
+The join: the mountstats `xprt: tcp <srcport> ...` line carries each lane's socket source port; match it to the socket's local port in `/proc/net/tcp` (filtering to remote port 2049) and emit per `(volume_id, xprt_idx)`, so these line up with the per-lane metrics above. Both files are read in the same scrape, so the join is point-in-time consistent even though the kernel regenerates the source port on reconnect.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_nfs_xprt_tcp_state` | Gauge | `volume_id`, `xprt_idx` | Kernel TCP state code (1=ESTABLISHED, 6=TIME_WAIT, 8=CLOSE_WAIT, 11=CLOSING, ...). `0` is a sentinel: the lane's source port has no unambiguous NFS socket right now (mid-reconnect, torn down, or a source-port collision across lanes). A lane can wedge while staying ESTABLISHED, so watch `tx_queue_bytes` for a stuck lane; `state != 1` catches reset/half-closed lanes. |
+| `crusoe_vm_nfs_xprt_tx_queue_bytes` | Gauge | `volume_id`, `xprt_idx` | Bytes queued in the send buffer, not yet acknowledged by the server. A sustained rise is the direct wedged-lane signal. |
+| `crusoe_vm_nfs_xprt_rx_queue_bytes` | Gauge | `volume_id`, `xprt_idx` | Bytes received into the socket buffer, not yet read by the NFS client. |
+| `crusoe_vm_nfs_xprt_retransmit_timeouts` | Gauge | `volume_id`, `xprt_idx` | Unrecovered retransmit timeouts on this socket (`/proc/net/tcp retrnsmt`). A gauge: it tracks the current socket and resets on reconnect. |
+| `crusoe_vm_nfs_sock_state_collection_errors_total` | Counter | - | Collection errors. |
+
 ### NFS Mount Events Collector (mountstats)
 
 **Source:** `src/collectors/nfs-mount-events-collector.go`
