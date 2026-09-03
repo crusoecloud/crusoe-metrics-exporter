@@ -142,6 +142,24 @@ func main() {
 	registry.MustRegister(nfsMountEventsCollector)
 	log.Infof("NFS mount-events collector enabled (mountstats: %s)", mountStatsPath)
 
+	// NFS socket-state collector (per-lane TCP state, send/recv queue backup,
+	// and retransmit timeouts from /proc/net/tcp{,6}, joined to the mountstats
+	// xprt lanes by source port). Exposes the transport health mountstats
+	// cannot: is each lane's socket ESTABLISHED, is data stuck in its send
+	// buffer, is it timing out. Reads the same host-proc mount, no extra
+	// privilege.
+	tcpPath := os.Getenv("NET_TCP_PATH")
+	if tcpPath == "" {
+		tcpPath = hostProcPath + "/1/net/tcp"
+	}
+	tcp6Path := os.Getenv("NET_TCP6_PATH")
+	if tcp6Path == "" {
+		tcp6Path = hostProcPath + "/1/net/tcp6"
+	}
+	nfsSockStateCollector := collectors.NewNFSSockStateCollector(mountStatsPath, tcpPath, tcp6Path)
+	registry.MustRegister(nfsSockStateCollector)
+	log.Infof("NFS socket-state collector enabled (mountstats: %s, tcp: %s, tcp6: %s)", mountStatsPath, tcpPath, tcp6Path)
+
 	// Disk usage collector (bytes used, inodes used per vd* device)
 	diskUsageCollector := collectors.NewDiskUsageCollector(hostMountsPath, hostProcPath+"/1/root")
 	registry.MustRegister(diskUsageCollector)
