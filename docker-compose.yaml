@@ -9,6 +9,8 @@ services:
     volumes:
       # Mount host /proc to /host/proc for disk and NFS stats
       - /proc:/host/proc:ro
+      # Mount debugfs for the NFS in-flight collector (vastnfs + sunrpc)
+      - /sys/kernel/debug:/sys/kernel/debug:ro
     environment:
       - PORT=9500
       - DISKSTATS_PATH=/host/proc/diskstats
