@@ -1,12 +1,15 @@
 package collectors
 
 import (
+	"bufio"
 	"bytes"
 	_ "embed"
 	"fmt"
+	"io"
 	"metrics-exporter/src/log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -19,10 +22,12 @@ import (
 //go:embed ebpf/disk_latency.o
 var diskLatencyBPF []byte
 
-// DiskLatencyCollector monitors disk I/O latency and throughput using eBPF tracepoints
+// DiskLatencyCollector monitors disk I/O latency and throughput using one eBPF
+// tracepoint at request completion (block_rq_complete). The program reads the
+// request's own start timestamp, so there is no in-flight map and nothing runs
+// at issue time.
 type DiskLatencyCollector struct {
 	objs             *ebpf.Collection
-	ioStartLink      link.Link
 	ioDoneLink       link.Link
 	readsDesc        *prometheus.Desc
 	writesDesc       *prometheus.Desc
@@ -34,7 +39,86 @@ type DiskLatencyCollector struct {
 	writeHistDesc    *prometheus.Desc
 	readErrorsDesc   *prometheus.Desc
 	writeErrorsDesc  *prometheus.Desc
+	allocTsDesc      *prometheus.Desc
 	collectionErrors *prometheus.Desc
+}
+
+// diskLatencyStats mirrors struct disk_latency_stats in ebpf/disk_latency.c.
+// disk_io_stats is a per-CPU map, so each lookup returns one of these per CPU.
+type diskLatencyStats struct {
+	ReadCount           uint64
+	WriteCount          uint64
+	ReadBytes           uint64
+	WriteBytes          uint64
+	TotalReadLatencyNs  uint64
+	TotalWriteLatencyNs uint64
+	ReadHistogram       [20]uint64
+	WriteHistogram      [20]uint64
+	ReadErrorCount      uint64
+	WriteErrorCount     uint64
+	AllocTsCount        uint64 // completions timed from request allocation (no dispatch timestamp)
+}
+
+// sumDiskStats adds up the per-CPU copies of one device's stats.
+func sumDiskStats(perCPU []diskLatencyStats) diskLatencyStats {
+	var t diskLatencyStats
+	for _, v := range perCPU {
+		t.ReadCount += v.ReadCount
+		t.WriteCount += v.WriteCount
+		t.ReadBytes += v.ReadBytes
+		t.WriteBytes += v.WriteBytes
+		t.TotalReadLatencyNs += v.TotalReadLatencyNs
+		t.TotalWriteLatencyNs += v.TotalWriteLatencyNs
+		for i := range v.ReadHistogram {
+			t.ReadHistogram[i] += v.ReadHistogram[i]
+			t.WriteHistogram[i] += v.WriteHistogram[i]
+		}
+		t.ReadErrorCount += v.ReadErrorCount
+		t.WriteErrorCount += v.WriteErrorCount
+		t.AllocTsCount += v.AllocTsCount
+	}
+	return t
+}
+
+// parseVirtioBlkMajor returns the major number of the "virtblk" driver from
+// the "Block devices:" section of /proc/devices, or 0 if it isn't listed.
+// virtio-blk's major is allocated at boot, so it can't be hardcoded.
+func parseVirtioBlkMajor(r io.Reader) uint32 {
+	sc := bufio.NewScanner(r)
+	inBlock := false
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "Block devices:") {
+			inBlock = true
+			continue
+		}
+		if strings.HasSuffix(line, "devices:") {
+			inBlock = false
+			continue
+		}
+		fields := strings.Fields(line)
+		if inBlock && len(fields) == 2 && fields[1] == "virtblk" {
+			if n, err := strconv.ParseUint(fields[0], 10, 32); err == nil {
+				return uint32(n)
+			}
+		}
+	}
+	return 0
+}
+
+// virtioBlkMajor reads parseVirtioBlkMajor from the host's /proc/devices.
+func virtioBlkMajor() uint32 {
+	procPath := os.Getenv("HOST_PROC_PATH")
+	if procPath == "" {
+		procPath = "/proc"
+	}
+	f, err := os.Open(filepath.Join(procPath, "devices"))
+	if err != nil {
+		log.Warnf("failed to read %s/devices: %v", procPath, err)
+		return 0
+	}
+	defer f.Close()
+	return parseVirtioBlkMajor(f)
 }
 
 var (
@@ -55,37 +139,33 @@ func NewDiskLatencyCollector() (*DiskLatencyCollector, error) {
 		return nil, fmt.Errorf("failed to load eBPF collection: %w", err)
 	}
 
+	// Count only virtio disks in the kernel: the collector reports vd* only, and
+	// skipping other devices (local NVMe) keeps them off this program entirely.
+	major := virtioBlkMajor()
+	if major == 0 {
+		log.Warnf("virtblk major not found in /proc/devices; counting all block devices")
+	}
+	if err := spec.RewriteConstants(map[string]interface{}{"vd_major": major}); err != nil {
+		return nil, fmt.Errorf("failed to set vd_major: %w", err)
+	}
+
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create eBPF collection: %w", err)
 	}
 
-	// Attach kprobes for block I/O tracking
-	ioStartProg := coll.Programs["io_start"]
-	if ioStartProg == nil {
-		coll.Close()
-		return nil, fmt.Errorf("io_start program not found in eBPF collection")
-	}
-	ioStartLink, err := link.Kprobe("blk_mq_start_request", ioStartProg, nil)
-	if err != nil {
-		coll.Close()
-		return nil, fmt.Errorf("failed to attach kprobe to blk_mq_start_request: %w", err)
-	}
-
 	ioDoneProg := coll.Programs["io_done"]
 	if ioDoneProg == nil {
-		ioStartLink.Close()
 		coll.Close()
 		return nil, fmt.Errorf("io_done program not found in eBPF collection")
 	}
-	ioDoneLink, err := link.Kprobe("blk_mq_end_request", ioDoneProg, nil)
+	ioDoneLink, err := link.AttachTracing(link.TracingOptions{Program: ioDoneProg})
 	if err != nil {
-		ioStartLink.Close()
 		coll.Close()
-		return nil, fmt.Errorf("failed to attach kprobe to blk_mq_end_request: %w", err)
+		return nil, fmt.Errorf("failed to attach tp_btf/block_rq_complete: %w", err)
 	}
 
-	log.Infof("Successfully attached disk I/O kprobes to blk_mq_start_request and blk_mq_end_request")
+	log.Infof("Attached disk I/O latency to tracepoint block_rq_complete (virtblk major %d)", major)
 
 	// Initialize device cache
 	if err := initDeviceCache(); err != nil {
@@ -93,9 +173,8 @@ func NewDiskLatencyCollector() (*DiskLatencyCollector, error) {
 	}
 
 	collector := &DiskLatencyCollector{
-		objs:        coll,
-		ioStartLink: ioStartLink,
-		ioDoneLink:  ioDoneLink,
+		objs:       coll,
+		ioDoneLink: ioDoneLink,
 		readsDesc: prometheus.NewDesc(
 			MetricPrefix+"disk_reads_completed_total",
 			"Total number of disk read operations completed",
@@ -156,6 +235,12 @@ func NewDiskLatencyCollector() (*DiskLatencyCollector, error) {
 			[]string{"device"},
 			nil,
 		),
+		allocTsDesc: prometheus.NewDesc(
+			MetricPrefix+"disk_latency_alloc_timestamp_total",
+			"Completions timed from request allocation because the queue records no dispatch time",
+			[]string{"device"},
+			nil,
+		),
 		collectionErrors: prometheus.NewDesc(
 			MetricPrefix+"disk_collection_errors_total",
 			"Total number of errors during disk stats collection",
@@ -167,104 +252,82 @@ func NewDiskLatencyCollector() (*DiskLatencyCollector, error) {
 	return collector, nil
 }
 
-// initDeviceCache initializes the device cache by scanning /sys/block
-func initDeviceCache() error {
-	deviceMutex.Lock()
-	defer deviceMutex.Unlock()
+// sysClassBlockPath lists every block device and partition (as symlinks).
+// /sys/block lists whole disks only, but requests carry the partition's
+// device number (e.g. vda1), so partitions must be resolvable too.
+var sysClassBlockPath = "/sys/class/block"
 
-	sysBlockPath := "/sys/block"
-	entries, err := os.ReadDir(sysBlockPath)
+// scanVirtioDevices maps device IDs ((major << 8) | (minor & 0xFF), the eBPF
+// encoding) to names for every virtio disk and partition (vd*) under root.
+// Entries are symlinks, so they are not filtered with IsDir.
+func scanVirtioDevices(root string) (map[uint32]string, error) {
+	entries, err := os.ReadDir(root)
 	if err != nil {
-		return fmt.Errorf("failed to read %s: %w", sysBlockPath, err)
+		return nil, fmt.Errorf("failed to read %s: %w", root, err)
 	}
-
+	found := make(map[uint32]string)
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
 		deviceName := entry.Name()
-		// Only process virtual disks (vd*)
+		// Only process virtual disks (vd*) and their partitions
 		if !strings.HasPrefix(deviceName, "vd") {
 			continue
 		}
-
-		// Read major and minor numbers
-		devPath := filepath.Join(sysBlockPath, deviceName, "dev")
+		devPath := filepath.Join(root, deviceName, "dev")
 		devData, err := os.ReadFile(devPath)
 		if err != nil {
 			log.Warnf("failed to read %s: %v", devPath, err)
 			continue
 		}
-
 		var major, minor uint32
-		_, err = fmt.Sscanf(string(devData), "%d:%d", &major, &minor)
-		if err != nil {
+		if _, err := fmt.Sscanf(string(devData), "%d:%d", &major, &minor); err != nil {
 			log.Warnf("failed to parse device numbers for %s: %v", deviceName, err)
 			continue
 		}
-
-		// Combine major and minor into device ID (same as eBPF)
-		deviceID := (major << 8) | (minor & 0xFF)
-		deviceCache[deviceID] = deviceName
+		found[(major<<8)|(minor&0xFF)] = deviceName
 	}
+	return found, nil
+}
 
-	log.Infof("Initialized device cache with %d virtual disks", len(deviceCache))
+// initDeviceCache initializes the device cache from sysClassBlockPath
+func initDeviceCache() error {
+	found, err := scanVirtioDevices(sysClassBlockPath)
+	if err != nil {
+		return err
+	}
+	deviceMutex.Lock()
+	defer deviceMutex.Unlock()
+	for id, name := range found {
+		deviceCache[id] = name
+	}
+	log.Infof("Initialized device cache with %d virtual disks and partitions", len(deviceCache))
 	return nil
 }
 
-// getDeviceName returns the device name for a given device ID
+// getDeviceName returns the device name for a given device ID, rescanning
+// sysClassBlockPath on a cache miss (e.g. a disk attached after startup).
 func getDeviceName(deviceID uint32) string {
 	deviceMutex.RLock()
-	defer deviceMutex.RUnlock()
-
-	if name, exists := deviceCache[deviceID]; exists {
+	name, exists := deviceCache[deviceID]
+	deviceMutex.RUnlock()
+	if exists {
 		return name
 	}
 
-	// If not in cache, try to resolve it dynamically
-	major := deviceID >> 8
-	minor := deviceID & 0xFF
-
-	// Try to find the device in /sys/block
-	sysBlockPath := "/sys/block"
-	entries, err := os.ReadDir(sysBlockPath)
-	if err != nil {
-		return fmt.Sprintf("vd%d:%d", major, minor)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	// The read lock is released before taking the write lock: sync.RWMutex
+	// cannot be upgraded, and holding both deadlocks.
+	if found, err := scanVirtioDevices(sysClassBlockPath); err == nil {
+		deviceMutex.Lock()
+		for id, n := range found {
+			deviceCache[id] = n
 		}
-
-		deviceName := entry.Name()
-		if !strings.HasPrefix(deviceName, "vd") {
-			continue
-		}
-
-		devPath := filepath.Join(sysBlockPath, deviceName, "dev")
-		devData, err := os.ReadFile(devPath)
-		if err != nil {
-			continue
-		}
-
-		var devMajor, devMinor uint32
-		_, err = fmt.Sscanf(string(devData), "%d:%d", &devMajor, &devMinor)
-		if err != nil {
-			continue
-		}
-
-		if devMajor == major && devMinor == minor {
-			// Cache the result
-			deviceMutex.Lock()
-			deviceCache[deviceID] = deviceName
-			deviceMutex.Unlock()
-			return deviceName
+		name, exists = deviceCache[deviceID]
+		deviceMutex.Unlock()
+		if exists {
+			return name
 		}
 	}
 
-	return fmt.Sprintf("vd%d:%d", major, minor)
+	return fmt.Sprintf("vd%d:%d", deviceID>>8, deviceID&0xFF)
 }
 
 // CalculatePercentiles calculates percentiles from histogram data
@@ -335,6 +398,7 @@ func (c *DiskLatencyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.writeHistDesc
 	ch <- c.readErrorsDesc
 	ch <- c.writeErrorsDesc
+	ch <- c.allocTsDesc
 	ch <- c.collectionErrors
 }
 
@@ -348,26 +412,16 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	// Iterate over all entries in the map
+	// Iterate over all entries in the map; each value is one copy per CPU
 	var key uint32
-	var value struct {
-		ReadCount           uint64
-		WriteCount          uint64
-		ReadBytes           uint64
-		WriteBytes          uint64
-		TotalReadLatencyNs  uint64
-		TotalWriteLatencyNs uint64
-		ReadHistogram       [20]uint64
-		WriteHistogram      [20]uint64
-		ReadErrorCount      uint64
-		WriteErrorCount     uint64
-	}
+	var perCPU []diskLatencyStats
 
 	totalEntries := 0
 	filteredEntries := 0
 	iter := statsMap.Iterate()
-	for iter.Next(&key, &value) {
+	for iter.Next(&key, &perCPU) {
 		totalEntries++
+		value := sumDiskStats(perCPU)
 
 		// Get device name from device ID
 		deviceName := getDeviceName(key)
@@ -463,6 +517,13 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 			float64(value.WriteErrorCount),
 			deviceName,
 		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.allocTsDesc,
+			prometheus.CounterValue,
+			float64(value.AllocTsCount),
+			deviceName,
+		)
 	}
 
 	if err := iter.Err(); err != nil {
@@ -477,9 +538,6 @@ func (c *DiskLatencyCollector) Collect(ch chan<- prometheus.Metric) {
 
 // Close cleans up the eBPF resources
 func (c *DiskLatencyCollector) Close() {
-	if c.ioStartLink != nil {
-		c.ioStartLink.Close()
-	}
 	if c.ioDoneLink != nil {
 		c.ioDoneLink.Close()
 	}

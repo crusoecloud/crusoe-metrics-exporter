@@ -15,7 +15,7 @@ The crusoe-metrics-exporter runs three eBPF-based collectors: **Disk**, **NFS**,
 
 ## Disk Latency Collector
 
-Tracks block I/O latency per device using `blk_mq_start_request` / `blk_mq_end_request` kprobes.
+Tracks block I/O latency per virtio disk (`vd*`) with one BTF tracepoint at completion (`block_rq_complete`), using the request's own start timestamp. There is no in-flight map, and other block devices (local NVMe) are skipped in the kernel.
 
 **No configuration required.** Always enabled, no env vars needed.
 
