@@ -14,7 +14,7 @@
 ebpf/                          # eBPF C source files
   nfs_latency.c                # NFS latency kprobes (tcp_sendmsg / tcp_recvmsg)
   objstore_latency.c           # Object store latency kprobes
-  disk_latency.c               # Disk I/O latency kprobes (blk_mq_start_request / blk_mq_end_request)
+  disk_latency.c               # Disk I/O latency: tp_btf/block_rq_complete, virtio disks only, no in-flight map
   vmlinux.h                    # Kernel type definitions for CO-RE
   *.h                          # Per-collector header files
 
@@ -246,7 +246,7 @@ Note: NFS UDP hasn't been implemented. It's assumed we use NFS4 everywhere.
 
 All three collectors use eBPF kprobes:
 
-- **Disk**: `blk_mq_start_request` / `blk_mq_end_request` - measures block I/O latency per device
+- **Disk**: tracepoint `block_rq_complete` (tp_btf) - block I/O latency per virtio disk from the request's own timestamp
 - **NFS**: `tcp_sendmsg` / `tcp_recvmsg` - measures NFS RPC round-trip latency per server IP
 - **Object Store**: `tcp_sendmsg` / `tcp_recvmsg` (kretprobe) - measures HTTP request latency to object store endpoints
 

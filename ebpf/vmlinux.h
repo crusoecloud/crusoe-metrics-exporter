@@ -34,6 +34,7 @@ typedef _Bool bool;
 // BPF map types
 #define BPF_MAP_TYPE_HASH 1
 #define BPF_MAP_TYPE_ARRAY 2
+#define BPF_MAP_TYPE_PERCPU_HASH 5
 #define BPF_ANY 0
 #define BPF_NOEXIST 1
 #define AF_INET 2
@@ -137,6 +138,8 @@ struct request {
     unsigned int cmd_flags;
     unsigned int __data_len;
     __u64 __sector;                // sector offset
+    __u64 start_time_ns;           // request allocation (set when iostats is on)
+    __u64 io_start_time_ns;        // issue to device (set when QUEUE_FLAG_STATS)
 };
 
 #pragma clang attribute pop
