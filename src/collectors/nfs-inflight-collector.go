@@ -77,8 +77,6 @@ func (c *NFSInflightCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	errorCount := 0.0
-
 	devToVolumes, err := c.volumesByDevice()
 	if err != nil {
 		log.Errorf("Error reading %s: %v", c.mountInfoPath, err)
@@ -121,7 +119,7 @@ func (c *NFSInflightCollector) Collect(ch chan<- prometheus.Metric) {
 	for volumeID, count := range inflightByVolume {
 		ch <- prometheus.MustNewConstMetric(c.inflight, prometheus.GaugeValue, count, volumeID)
 	}
-	ch <- prometheus.MustNewConstMetric(c.collectionErrors, prometheus.CounterValue, errorCount)
+	ch <- prometheus.MustNewConstMetric(c.collectionErrors, prometheus.CounterValue, 0)
 }
 
 // volumesByDevice maps each NFS mount's st_dev ("maj:min", mountinfo
