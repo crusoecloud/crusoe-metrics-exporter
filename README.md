@@ -8,8 +8,7 @@ A Prometheus-compatible metrics exporter for Crusoe VMs. Collects guest health s
 - **Guest health signals** -- CPU steal normalized by vCPU count, PSI memory/I/O pressure, and kernel soft-lockup detection, for diagnosing problems the host's own metrics cannot see from outside the guest
 - **Histogram metrics** -- geometric bucket distributions for disk, NFS, and object store latency
 - **TCP retransmit counters** -- per-destination retransmit tracking for NFS and object store as an availability signal
-- **NFS mountstats parsing** -- RPC counts, RTT, execution time, timeouts, backlog, per-`nconnect`-lane (xprt) state, and per-mount VFS/event counters from `/proc/1/mountstats`
-- **Volume ID labeling** -- NFS metrics labeled by Crusoe volume ID extracted from mount paths
+- **NFS mountstats parsing** -- RPC counts, RTT, execution time, timeouts, backlog, per-`nconnect`-lane (xprt) state, and per-mount VFS/event counters from `/proc/1/mountstats`- **Volume ID labeling** -- NFS metrics labeled by Crusoe volume ID extracted from mount paths
 - **NVMe SMART/Health monitoring** -- passthrough drive health via admin commands (critical warnings, media errors, endurance, spare capacity)
 - **Modular collector architecture** -- each subsystem is an independent `prometheus.Collector`
 - **Graceful degradation** -- eBPF collectors log warnings and continue if the kernel lacks support
@@ -41,6 +40,9 @@ See [BUILD_TEST.md](BUILD_TEST.md) for details on how to build/test eBPF locally
 | `PORT` | `9500` | HTTP server port |
 | `HOST_PROC_PATH` | `/host/proc` (container) or `/proc` (bare metal) | Root of the host's `/proc` filesystem |
 | `MOUNTSTATS_PATH` | `$HOST_PROC_PATH/1/mountstats` | Path to mountstats file for NFS stats collector |
+| `MOUNTINFO_PATH` | `$HOST_PROC_PATH/1/mountinfo` | Path to mountinfo for the NFS in-flight collector (mount → superblock mapping) |
+| `VASTNFS_DEBUGFS_PATH` | `/sys/kernel/debug/vastnfs` | NFS driver debugfs root (superblock → RPC client mapping) for the in-flight collector. Use `/host/sys/kernel/debug/vastnfs` when the host `/sys` is mounted at `/host/sys` |
+| `SUNRPC_DEBUGFS_PATH` | `/sys/kernel/debug/sunrpc` | sunrpc debugfs root (per-client task lists) for the in-flight collector. Use `/host/sys/kernel/debug/sunrpc` when the host `/sys` is mounted at `/host/sys` |
 | `NFS_SERVER_IPS` | (auto-detected from `/proc/mounts`) | Comma-separated NFS server IPs for eBPF latency filtering |
 | `NFS_TARGET_PORTS` | `2049` | Comma-separated NFS target ports |
 | `NFS_ENABLE_VOLUME_ID` | `true` | Enable volume ID extraction from mount paths |
@@ -184,6 +186,17 @@ The join: the mountstats `xprt: tcp <srcport> ...` line carries each lane's sock
 | `crusoe_vm_nfs_xprt_retransmit_timeouts` | Gauge | `volume_id`, `xprt_idx` | Unrecovered retransmit timeouts on this socket (`/proc/net/tcp retrnsmt`). A gauge: it tracks the current socket and resets on reconnect. |
 | `crusoe_vm_nfs_sock_state_collection_errors_total` | Counter | - | Collection errors. |
 
+### NFS In-Flight Collector (sunrpc debugfs)
+
+**Source:** `src/collectors/nfs-inflight-collector.go`
+
+Number of NFS RPC requests currently outstanding per volume, from the kernel's live per-client task list (`<SUNRPC_DEBUGFS_PATH>/rpc_clnt/<id>/tasks`, mapped to volumes via `mountinfo` and the NFS driver's debugfs superblock table). Unlike the mountstats counters above, it moves *during* a hang and returns to zero when nothing is waiting. Requires debugfs to be visible to the exporter; otherwise it logs one warning and emits no series. Volumes on a shared transport report the same pooled value.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `crusoe_vm_nfs_rpc_inflight_requests` | Gauge | `volume_id` | RPC requests currently outstanding, including ones queued but not yet transmitted. `> 0` while nothing completes is the stall signature. |
+| `crusoe_vm_nfs_inflight_collection_errors_total` | Counter | - | Collection errors. |
+
 ### NFS Mount Events Collector (mountstats)
 
 **Source:** `src/collectors/nfs-mount-events-collector.go`
@@ -325,7 +338,6 @@ rate(crusoe_vm_nfs_xprt_backlog_utilization[5m]) > 0
 
 # Per-lane reconnect churn (server is resetting connections on this lane)
 rate(crusoe_vm_nfs_xprt_connect_count_total[5m]) > 0
-
 # Page-cache hit bytes per second (see Mount Events Collector for derivation)
 rate(crusoe_vm_nfs_mount_normal_read_bytes_total[5m])
   + rate(crusoe_vm_nfs_mount_direct_read_bytes_total[5m])
