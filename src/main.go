@@ -160,6 +160,28 @@ func main() {
 	registry.MustRegister(nfsSockStateCollector)
 	log.Infof("NFS socket-state collector enabled (mountstats: %s, tcp: %s, tcp6: %s)", mountStatsPath, tcpPath, tcp6Path)
 
+	// NFS in-flight collector (currently outstanding RPC requests per
+	// volume, from the sunrpc per-client task list via the vastnfs debugfs
+	// superblock table). The live task list sees stalls that the
+	// completion-gated mountstats counters cannot: it includes requests
+	// queued but never transmitted, and cannot be skewed by lost replies.
+	// Idles gracefully (no series) when debugfs or vastnfs is unavailable.
+	mountInfoPath := os.Getenv("MOUNTINFO_PATH")
+	if mountInfoPath == "" {
+		mountInfoPath = hostProcPath + "/1/mountinfo"
+	}
+	vastnfsDebugPath := os.Getenv("VASTNFS_DEBUGFS_PATH")
+	if vastnfsDebugPath == "" {
+		vastnfsDebugPath = "/sys/kernel/debug/vastnfs"
+	}
+	sunrpcDebugPath := os.Getenv("SUNRPC_DEBUGFS_PATH")
+	if sunrpcDebugPath == "" {
+		sunrpcDebugPath = "/sys/kernel/debug/sunrpc"
+	}
+	nfsInflightCollector := collectors.NewNFSInflightCollector(mountInfoPath, vastnfsDebugPath, sunrpcDebugPath)
+	registry.MustRegister(nfsInflightCollector)
+	log.Infof("NFS in-flight collector enabled (mountinfo: %s, vastnfs: %s, sunrpc: %s)", mountInfoPath, vastnfsDebugPath, sunrpcDebugPath)
+
 	// Disk usage collector (bytes used, inodes used per vd* device)
 	diskUsageCollector := collectors.NewDiskUsageCollector(hostMountsPath, hostProcPath+"/1/root")
 	registry.MustRegister(diskUsageCollector)
