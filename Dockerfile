@@ -39,7 +39,7 @@ RUN mkdir -p src/collectors/ebpf && \
 RUN mkdir -p build/dist && CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o build/dist/crusoe-metrics-exporter ./src
 
 # Final stage
-FROM alpine:3.19
+FROM alpine:3.23.7
 
 WORKDIR /app
 
